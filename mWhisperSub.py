@@ -11,7 +11,6 @@ from collections import deque
 from datetime import timedelta
 from pathlib import Path
 from difflib import SequenceMatcher
-
 import numpy as np
 import scipy.signal as ss
 import sounddevice as sd
@@ -26,8 +25,8 @@ parser.add_argument("--model_dir", default="models/whisper_medium_ct2")
 parser.add_argument("--device", default="-1")
 parser.add_argument("--list-devices", action="store_true")
 parser.add_argument("--lang", default="zh")
-parser.add_argument("--win", type=float, default=12.0)
-parser.add_argument("--maxhop", type=float, default=8.0)
+parser.add_argument("--win", type=float, default=4)
+parser.add_argument("--maxhop", type=float, default=2.0)
 parser.add_argument("--silence", type=float, default=0.3)
 parser.add_argument("--sr", type=int, default=16000)
 parser.add_argument("--dtype", default="int16", choices=["int16", "float32"])
@@ -156,7 +155,7 @@ audio_stream.start()
 def trigger_worker():
     global last_vad_speech, last_trigger_ts, in_speech
     while True:
-        time.sleep(0.01)
+        time.sleep(0.5)
         with buf_lock:
             if len(buffer) < FS_IN:
                 continue
