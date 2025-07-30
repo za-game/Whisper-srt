@@ -181,3 +181,5 @@ cython_debug/
 .cursorindexingignore
 /models
 /test
+live.srt
+profile.html
