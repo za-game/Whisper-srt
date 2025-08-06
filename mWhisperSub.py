@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Realtime Whisper → SRT 字幕工具（2025-07-30 C-full, 強化除錯 - 完整版, fixed）"""
+"""Realtime Whisper → SRT 字幕工具（2025-07-30 C-full, 強化除錯 - 完整版, style-echo fix）"""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from datetime import timedelta
 from pathlib import Path
 from difflib import SequenceMatcher
 from typing import Deque
+import re
 
 import numpy as np
 import scipy.signal as ss
@@ -29,7 +30,12 @@ seen_speech = False
 SUPPORTED_VAD_SR = {8000, 16000, 32000, 48000}
 samples_total = 0
 samples_lock = threading.Lock()
-audio_t0: float | None = None  # ADC 時基
+audio_t0: float | None = None        # ADC 時基
+audio_origin: float | None = None    # SRT 相對起點（第一次見到音訊時間）
+_punct_re = re.compile(r"[，。？！；、,.!?;:…]")
+
+# 可能被模型「抄出來」的 style 指令關鍵字（過濾用）
+STYLE_ECHO_KEYWORDS = ("繁體中文", "请以繁体", "請以繁體", "不要使用簡體", "不要使用简体", "台灣用語", "台湾用语")
 
 # ────────────────────── CLI 參數 ────────────────────────
 parser = argparse.ArgumentParser()
@@ -44,7 +50,7 @@ parser.add_argument("--silence", type=float, default=0.3,
 parser.add_argument("--sr", type=int, default=16000)
 parser.add_argument("--dtype", default="int16", choices=["int16", "float32"])
 parser.add_argument("--beam", type=int, default=3)
-parser.add_argument("--best_of", type=int, default=1)  # beam 模式下 best_of 通常無效，設 1 減少混淆
+parser.add_argument("--best_of", type=int, default=1)  # beam 模式下 best_of 通常無效
 parser.add_argument("--input_file")
 parser.add_argument("--output")
 parser.add_argument("--compute_type", default="int8_float16",
@@ -74,6 +80,10 @@ parser.add_argument("--write_strategy", default="truncate",
                     help="SRT 寫檔策略：OBS 建議 truncate；一般播放器可用 replace")
 parser.add_argument("--fsync", action="store_true",
                     help="寫檔後 flush+fsync，降低讀到半檔風險")
+# 中文正規化
+parser.add_argument("--zh", default="t2tw",
+                    choices=["none","t2tw","s2t","s2twp"],
+                    help="中文字形正規化（預設 t2tw：繁→台灣用語）")
 args = parser.parse_args()
 
 if args.list_devices:
@@ -116,6 +126,38 @@ def split_segment(words, mn: int, mx: int):
         out.append((st, buf[-1].end, "".join(x.word for x in buf).strip()))
     return out
 
+# ──────────────── 熱詞/風格回聲過濾 ─────────────────────
+def is_style_echo(text: str) -> bool:
+    if not text:
+        return False
+    return any(k in text for k in STYLE_ECHO_KEYWORDS)
+
+def is_prompt_echo(text: str, hotwords: list[str]) -> bool:
+    if not text or not hotwords:
+        return False
+    punct = bool(_punct_re.search(text))
+    toks = text.strip().split()
+    hw = [w for w in hotwords if w]
+    ratio_tok = (sum(1 for t in toks if t in set(hw)) / len(toks)) if toks else 0.0
+    s = _punct_re.sub("", text.replace(" ", ""))
+    if not s:
+        return False
+    # 用遮罩避免重覆計數
+    mask = [False] * len(s)
+    for w in hw:
+        start = 0
+        wl = len(w)
+        while True:
+            j = s.find(w, start)
+            if j == -1:
+                break
+            for k in range(j, j + wl):
+                if 0 <= k < len(mask):
+                    mask[k] = True
+            start = j + 1
+    ratio_cov = (sum(mask) / len(s)) if s else 0.0
+    return ((ratio_tok >= 0.8) or (ratio_cov >= 0.8)) and (not punct or len(s) <= 12)
+
 # ─────────────────── 模型載入 ────────────────────────
 def load_model():
     device = "cpu" if args.gpu < 0 else "cuda"
@@ -126,13 +168,32 @@ def load_model():
 
 model = load_model()
 
+# ─────────────────── OpenCC（可選）────────────────────
+try:
+    import opencc
+    _cc_cache: dict[str, any] = {}
+    def _get_cc(mode: str):
+        if mode == "none":
+            return None
+        if mode not in _cc_cache:
+            _cc_cache[mode] = opencc.OpenCC(mode)
+        return _cc_cache[mode]
+except Exception:
+    def _get_cc(mode: str): return None
+
+def zh_norm(text: str) -> str:
+    cc = _get_cc(args.zh)
+    return cc.convert(text) if cc else text
+
 # ────────────── 熱詞監聽 ────────────────────────────
 _hotwords: list[str] = []
 _hotwords_mtime: float | None = None
 
 def _load_hotwords(path: str) -> list[str]:
     try:
-        return Path(path).read_text(encoding="utf-8").strip().split()
+        ws = Path(path).read_text(encoding="utf-8").strip().split()
+        ws = [w for w in ws if len(w) >= 2]             # 過濾過短詞
+        return [zh_norm(w) for w in ws]                 # 與輸出一致的正規化
     except FileNotFoundError:
         return []
 
@@ -144,7 +205,7 @@ def _update_hotwords():
         mt = os.path.getmtime(args.hotwords_file)
     except FileNotFoundError:
         if _hotwords:
-            _hotwords = []            # 原子替換，避免就地 clear 造成競態
+            _hotwords = []
             _hotwords_mtime = None
         return
     if _hotwords_mtime != mt:
@@ -160,14 +221,22 @@ def get_prompt() -> str | None:
 
 # ────────────── 單檔轉寫 ────────────────────────────
 if args.input_file:
-    prompt = get_prompt()
+    base_prompt = get_prompt()  # 只放熱詞
     segs, _ = model.transcribe(args.input_file, language=args.lang,
                                beam_size=args.beam, best_of=args.best_of,
                                word_timestamps=True,
-                               initial_prompt=prompt)
-    subs = [srt.Subtitle(i + 1, timedelta(seconds=s.start),
-                         timedelta(seconds=s.end), s.text.strip())
-            for i, s in enumerate(segs)]
+                               initial_prompt=base_prompt)
+    subs = []
+    idx = 1
+    for s in segs:
+        txt = zh_norm(s.text.strip())
+        if is_style_echo(txt):
+            if args.log:
+                log.info("[DROP style-echo] %s", txt)
+            continue
+        subs.append(srt.Subtitle(idx, timedelta(seconds=s.start),
+                                 timedelta(seconds=s.end), txt))
+        idx += 1
     (Path(args.output) if args.output else Path(args.input_file).with_suffix(".srt")).write_text(
         srt.compose(subs), encoding="utf-8-sig")
     raise SystemExit
@@ -214,7 +283,6 @@ def audio_cb(indata, frames, t, status):
     with samples_lock:
         samples_total += frames
         if audio_t0 is None:
-            # sounddevice 的 ADC 單調時基；若取不到則退回 monotonic
             audio_t0 = getattr(t, "inputBufferAdcTime", time.monotonic())
 
 try:
@@ -231,13 +299,12 @@ def audio_now():
 # ─────────────── 觸發判定（VAD/HOP） ─────────────────
 def trigger_worker():
     global last_vad_speech, last_trigger_ts, last_trigger_aud, last_state
-    global noise_floor, last_change_ts, seen_speech
+    global noise_floor, last_change_ts, seen_speech, audio_origin
 
     tick = 0
     TAIL_KEEP_S = 0.2
     poll_s = 0.05
     prev_mono = time.monotonic()
-
     dropped_infer = 0
 
     while True:
@@ -246,8 +313,11 @@ def trigger_worker():
         mono = time.monotonic()
         dt = max(0.0, min(0.25, mono - prev_mono))
         prev_mono = mono
-        now_wall = time.time()           # 僅用於 CSV/日誌
-        anow = audio_now()               # 音訊時間（秒）
+        now_wall = time.time()
+        anow = audio_now()
+
+        if audio_origin is None:
+            audio_origin = anow
 
         with buf_lock:
             if len(buffer) < FS_IN:
@@ -264,7 +334,7 @@ def trigger_worker():
             alpha_eff = float(decay) ** dt
             noise_floor = alpha_eff * noise_floor + (1.0 - alpha_eff) * rms
 
-        thr = noise_floor * args.vad_gain
+        thr = (noise_floor or 0.0) * args.vad_gain
         vad_flag = vad.is_speech(frame.tobytes(), FS_IN)
         speech = bool(vad_flag or (rms > thr))
 
@@ -272,14 +342,11 @@ def trigger_worker():
         if args.force_silence:
             dyn_sil = 0.0
 
-        # 狀態轉換與無聲時長統計（用 mono）
         prev_state = last_state
         if speech != prev_state:
             dt_state = (mono - last_change_ts) if last_change_ts else 0.0
             if (not prev_state) and speech and dt_state > 0:
-                # 去極端值，避免開場長靜音拉高 dyn_sil
-                sil = max(0.08, min(2.0, dt_state))
-                pause_hist.append(sil)
+                pause_hist.append(max(0.08, min(2.0, dt_state)))
             last_change_ts = mono
             last_state = speech
 
@@ -287,14 +354,12 @@ def trigger_worker():
             last_vad_speech = mono
             seen_speech = True
 
-        # 觸發決策：VAD 用 mono；MAXHOP 用 anow（音訊時間）
         reason = None
         if seen_speech and (not speech) and (mono - last_vad_speech) >= dyn_sil:
             reason = "VAD"
         elif speech and (anow - last_trigger_aud) >= max(MAXHOP_S, MIN_GAP_S):
             reason = "MAXHOP"
 
-        # DEBUG / CSV
         if args.log >= 2 and tick % args.dbg_every == 0:
             log.debug("rms=%.1f noise=%.1f thr=%.1f vad=%d speech=%d dyn_sil=%.2f",
                       rms, noise_floor, thr, int(vad_flag), int(speech), dyn_sil)
@@ -305,7 +370,6 @@ def trigger_worker():
         if reason is None:
             continue
 
-        # 取段並保留 0.2s 尾巴
         with buf_lock:
             seg = np.array(buffer, dtype=np.int16)
             buffer.clear()
@@ -328,7 +392,7 @@ def trigger_worker():
                 tmp.append(item); infer_q.task_done()
             for it in tmp: infer_q.put_nowait(it)
             if not dropped and infer_q.full():
-                _ = infer_q.get_nowait(); infer_q.task_done()  # 仍滿則丟最舊
+                _ = infer_q.get_nowait(); infer_q.task_done()
             infer_q.put_nowait((seg, anow, reason))
             dropped_infer += 1
             if args.log >= 2 and dropped_infer % 50 == 0:
@@ -343,24 +407,49 @@ model_lock = threading.Lock()
 def consumer_worker():
     dropped_write = 0
     while True:
+        _update_hotwords()  # 每段推理前即時拉取熱詞更新
         seg_int16, end_ts, reason = infer_q.get()
         try:
             pcm_f = seg_int16.astype(np.float32) / 32768.0
             if FS_IN != FS_OUT:
                 pcm_f = ss.resample_poly(pcm_f, FS_OUT, FS_IN)
-            prompt = get_prompt()  # 鎖外快照
+            seg_len = len(pcm_f) / FS_OUT  # 鎖外
+            seg_rms = rms_energy(seg_int16)
+
+            hot = _hotwords[:]  # 快照
+            use_prompt = None
+            if hot:
+                local_noise = noise_floor or 0.0
+                dyn_thr = local_noise * max(1.5, args.vad_gain * 0.25)
+                if (seg_len >= 0.7 or reason == "VAD") and (seg_rms > dyn_thr):
+                    use_prompt = " ".join(hot)  # 只放熱詞
+
             with model_lock:
                 segments, _ = model.transcribe(
                     pcm_f, language=args.lang, beam_size=args.beam, best_of=args.best_of,
                     condition_on_previous_text=False, word_timestamps=True,
-                    initial_prompt=prompt
+                    initial_prompt=use_prompt
                 )
-            seg_len = len(pcm_f) / FS_OUT
+
+            origin = audio_origin or 0.0
             for seg in segments:
-                for st, et, txt in split_segment(seg.words, args.min_chars, args.max_chars):
+                for st, et, raw_txt in split_segment(seg.words, args.min_chars, args.max_chars):
+                    txt = zh_norm(raw_txt.strip())
+                    if is_style_echo(txt):
+                        if args.log:
+                            log.info("[DROP style-echo] %s", txt)
+                        continue
+                    if is_prompt_echo(txt, hot):
+                        if args.log:
+                            log.info("[DROP hotword-echo] %s", txt)
+                        continue
+                    start = (end_ts - seg_len + st) - origin
+                    end = (end_ts - seg_len + et) - origin
+                    if start < 0:
+                        start = 0.0
                     rec = {
-                        "start": end_ts - seg_len + st,
-                        "end":   end_ts - seg_len + et,
+                        "start": start,
+                        "end":   end,
                         "text":  txt,
                         "reason": reason
                     }
@@ -408,7 +497,7 @@ def writer():
         sliding = [s for s in sliding if now - s["start"] < DEDUP_WIN]
 
         # ④ 事件驅動 + 節流 flush
-        if any(rec["text"].endswith(p) for p in "。！？") or rec["reason"] == "MERGE":
+        if any(rec["text"].endswith(p) for p in "。！？…") or rec["reason"] == "MERGE":
             flush(live); last_flush = time.monotonic()
         elif time.monotonic() - last_flush >= FLUSH_EVERY:
             flush(live); last_flush = time.monotonic()
@@ -428,9 +517,8 @@ def flush(live):
         tmp = outp.with_suffix(outp.suffix + ".tmp")
         try:
             tmp.write_text(data, encoding="utf-8-sig")
-            os.replace(tmp, outp)  # 原子交換路徑（一般播放器友善）
+            os.replace(tmp, outp)  # 原子交換路徑
         except PermissionError:
-            # 若被 OBS 佔用，退回截斷寫入
             with open(outp, "w", encoding="utf-8-sig", newline="") as f:
                 f.write(data)
                 if args.fsync:
@@ -438,7 +526,6 @@ def flush(live):
             try: tmp.unlink()
             except Exception: pass
     else:
-        # 就地截斷（OBS 友善）
         with open(outp, "w", encoding="utf-8-sig", newline="") as f:
             f.write(data)
             if args.fsync:
