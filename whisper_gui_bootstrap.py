@@ -26,9 +26,9 @@ from PyQt5 import QtCore as qtc, QtWidgets as qtw, QtGui as qtg
 
 
 # ───────────────────────────── Config ─────────────────────────────
-HOME_DIR        = Path.home() / ".whisper_caption"
-VENV_DIR        = HOME_DIR / "venv"
-MODEL_DIR_ROOT  = HOME_DIR / "models"
+ROOT_DIR       = Path(__file__).resolve().parent
+VENV_DIR       = ROOT_DIR / "venv"
+MODEL_DIR_ROOT = ROOT_DIR / "models"
 ENGINE_PY       = Path(__file__).with_name("mWhisperSub.py")
 
 MODELS = {
@@ -174,7 +174,6 @@ class MainWin(qtw.QMainWindow):
 
     def _bootstrap_worker(self, tag: str):
         try:
-            HOME_DIR.mkdir(parents=True, exist_ok=True)
             MODEL_DIR_ROOT.mkdir(parents=True, exist_ok=True)
 
             if not venv_exists():
@@ -202,9 +201,9 @@ class MainWin(qtw.QMainWindow):
         except Exception as e:
             self.q.put(("err", str(e)))
 
-        def _msg(self, m:str):
-            self.status.setText(m)
-            self.q.put(("msg",m))
+    def _msg(self, m:str):
+        self.status.setText(m)
+        self.q.put(("msg",m))
 
     # ── GUI polling ──
     def timerEvent(self,_):
