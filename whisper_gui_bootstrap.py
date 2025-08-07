@@ -14,7 +14,7 @@ Whisper Live Caption – GUI with One-Click Bootstrap
 """
 
 from __future__ import annotations
-import importlib.util, subprocess, sys, os, re, queue, threading
+import importlib.util, subprocess, sys, os, re, queue, threading, webbrowser
 if importlib.util.find_spec("PyQt5") is None:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "PyQt5"])
 from PyQt5 import QtCore as qtc, QtWidgets as qtw, QtGui as qtg
@@ -32,8 +32,9 @@ MODEL_DIR_ROOT = ROOT_DIR / "models"
 ENGINE_PY       = Path(__file__).with_name("mWhisperSub.py")
 
 MODELS = {
-    "small":  {"repo": "myshell-ai/whisper-small-ct2",  "gb": 1.1},
-    "medium": {"repo": "myshell-ai/whisper-medium-ct2", "gb": 2.5},
+    "small":  {"repo": "Systran/faster-whisper-small",        "gb": 1.1},
+    "medium": {"repo": "Systran/faster-whisper-medium",       "gb": 2.6},
+    "large":  {"repo": "Systran/faster-whisper-large-v2",     "gb": 5.2},
 }
 
 # ───────────────────────────── Helpers ────────────────────────────
@@ -57,11 +58,21 @@ def nvidia_cuda_version() -> Optional[str]:
 _PERCENT = re.compile(r"(\\d{1,3})%")
 
 def pip_install(py_exe: str, pkgs: List[str], q: queue.Queue, tag: str):
-    cmd  = [py_exe, "-m", "pip", "install", "--progress-bar", "ascii", "--quiet"] + pkgs
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
+    ver_txt = subprocess.check_output([py_exe, "-m", "pip", "--version"], text=True)
+    m = re.search(r"pip (\d+)\.(\d+)", ver_txt)
+    major = int(m.group(1)) if m else 0
+    cmd  = [py_exe, "-m", "pip", "install"]
+    if major < 24:
+        cmd += ["--progress-bar", "ascii", "--quiet"]
+    else:
+        cmd += ["--progress-bar", "on"]
+    cmd += pkgs
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1)
     last = -1
-    for line in proc.stdout:          # type: ignore
+    log: List[str] = []
+    for line in proc.stdout:  # type: ignore
+        log.append(line)        
         m = _PERCENT.search(line)
         if m:
             pct = int(m.group(1))
@@ -70,16 +81,15 @@ def pip_install(py_exe: str, pkgs: List[str], q: queue.Queue, tag: str):
                 last = pct
     proc.wait()
     if proc.returncode:
-        raise RuntimeError("pip install failed: " + " ".join(pkgs))
+        raise RuntimeError("pip install failed: " + " ".join(pkgs) + "\n" + "".join(log))
 
 def ensure_torch(py_exe: str, q: queue.Queue):
     if importlib.util.find_spec("torch"):
         return
     cuda = nvidia_cuda_version()
     wheel = "cu121" if cuda and float(cuda) >= 11.8 else ("cu118" if cuda else "cpu")
-    pip_install(py_exe, 
-        ["torch","torchvision","torchaudio",
-         f"--extra-index-url=https://download.pytorch.org/whl/{wheel}"], q, "torch")
+    pip_install(py_exe,["--extra-index-url", f"https://download.pytorch.org/whl/{wheel}","torch", "torchvision", "torchaudio"],q, "torch")
+
 
 # ──────────────────── HF model download (tqdm→progress) ──────────
 class HFDownload(qtc.QThread):
@@ -102,6 +112,40 @@ class HFDownload(qtc.QThread):
                           resume_download=True, tqdm_class=Bar)
         self.done.emit()
 
+class TokenDialog(qtw.QDialog):
+    """Prompt for Hugging Face token when download needs auth."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Hugging Face 登入")
+        layout = qtw.QFormLayout(self)
+        self.token_edit = qtw.QLineEdit()
+        self.token_edit.setEchoMode(qtw.QLineEdit.Password)
+        layout.addRow("Token", self.token_edit)
+        btn_login = qtw.QPushButton("登入")
+        btn_open = qtw.QPushButton("開啟 Token 頁面")
+        btn_login.clicked.connect(self._do_login)
+        btn_open.clicked.connect(lambda: webbrowser.open("https://huggingface.co/settings/tokens"))
+        btns = qtw.QHBoxLayout()
+        btns.addWidget(btn_login)
+        btns.addWidget(btn_open)
+        layout.addRow(btns)
+        self.msg = qtw.QLabel("")
+        layout.addRow(self.msg)
+
+    def _do_login(self):
+        tok = self.token_edit.text().strip()
+        if not tok:
+            self.msg.setText("請輸入 token")
+            return
+        try:
+            from huggingface_hub import login
+            login(token=tok)
+            self.msg.setText("登入成功")
+            self.accept()
+        except Exception as e:
+            self.msg.setText(f"登入失敗: {e}")
+
 # ──────────────────────────── Main GUI ───────────────────────────
 class MainWin(qtw.QMainWindow):
     def __init__(self):
@@ -120,6 +164,7 @@ class MainWin(qtw.QMainWindow):
         self.dev_box.showPopup = showPopup
         self.model_box = qtw.QComboBox(); self._fill_models()
         self.status = qtw.QLabel("Idle")
+        self.status.setTextInteractionFlags(qtc.Qt.TextSelectableByMouse | qtc.Qt.TextSelectableByKeyboard)
         self.prog = qtw.QProgressBar(); self.prog.hide()
         self.btn = qtw.QPushButton("Start")
         self.log = qtw.QPlainTextEdit(); self.log.setReadOnly(True)
@@ -179,7 +224,7 @@ class MainWin(qtw.QMainWindow):
             if not venv_exists():
                 self._msg("Creating virtualenv…")
                 run([sys.executable,"-m","venv",str(VENV_DIR)])
-                run([py_in_venv(),"-m","pip","install","--upgrade","pip","--quiet"])
+                run([py_in_venv(),"-m","pip","install","--upgrade","pip","--quiet","--log"])
 
             self._msg("Installing PyTorch…")
             ensure_torch(py_in_venv(), self.q)
@@ -195,9 +240,15 @@ class MainWin(qtw.QMainWindow):
                 dl = HFDownload(MODELS[tag]["repo"], dest)
                 dl.progress.connect(lambda p: self.q.put(("model",p)))
                 dl.done.connect(  lambda: self.q.put(("model",100)))
-                dl.run()
+                try:
+                    dl.run()
+                except Exception as e:
+                    if "401" in str(e) or "Unauthorized" in str(e):
+                        self.q.put(("need_token", tag))
+                        return
+                    raise
 
-            self.q.put(("done",tag))    
+            self.q.put(("done",tag))
         except Exception as e:
             self.q.put(("err", str(e)))
 
@@ -223,6 +274,15 @@ class MainWin(qtw.QMainWindow):
                     self._fill_models()
                     self.model_box.setCurrentText(val)
                     self._launch_asr()
+                elif typ=="need_token":
+                    self.prog.hide(); self.status.setText("需要 HuggingFace Token")
+                    dlg = TokenDialog(self)
+                    if dlg.exec_() == qtw.QDialog.Accepted:
+                        self.log.appendPlainText("[Auth] Token saved. Retrying download…")
+                        threading.Thread(target=self._bootstrap_worker, args=(val,), daemon=True).start()
+                    else:
+                        self.log.appendPlainText("[Auth] Token input cancelled")
+                        self.btn.setEnabled(True)
                 elif typ=="err":
                     self.log.appendPlainText("[ERROR] "+val)
                     self.status.setText(val)

@@ -59,7 +59,7 @@ _punct_re = re.compile(r"[，。？！；、,.!?;:…]")
 parser = argparse.ArgumentParser(description="Realtime Whisper→SRT 轉寫器")
 
 # 3-1 模型與裝置
-parser.add_argument("--model_dir", default="models/whisper_medium_ct2")
+parser.add_argument("--model_dir", default="models/medium")
 parser.add_argument("--gpu", type=int, default=0, help="<0=CPU, 0+=GPU index")
 parser.add_argument("--compute_type", default="int8_float16",
                     choices=["int8", "int8_float16", "float16", "float32"])
