@@ -14,7 +14,7 @@ Whisper Live Caption – GUI with One-Click Bootstrap
 """
 
 from __future__ import annotations
-import importlib.util, subprocess, sys
+import importlib.util, subprocess, sys, os, re, queue, threading
 if importlib.util.find_spec("PyQt5") is None:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "PyQt5"])
 from PyQt5 import QtCore as qtc, QtWidgets as qtw
