@@ -111,6 +111,12 @@ class MainWin(qtw.QMainWindow):
 
         # UI widgets
         self.dev_box = qtw.QComboBox(); self._fill_devs()
+
+        def showPopup():
+            self._fill_devs()
+            qtw.QComboBox.showPopup(self.dev_box)
+
+        self.dev_box.showPopup = showPopup
         self.model_box = qtw.QComboBox(); self.model_box.addItems(MODELS)
         self.prog = qtw.QProgressBar(); self.prog.hide()
         self.btn = qtw.QPushButton("Start")
@@ -137,7 +143,13 @@ class MainWin(qtw.QMainWindow):
                                     "sounddevice is not installed. Please run the bootstrap first and retry.")
             return
         self.dev_box.clear()
-        for i, d in enumerate(sd.query_devices()):
+        try:
+            devices = sd.query_devices()
+        except Exception:
+            qtw.QMessageBox.warning(self, "Device query failed",
+                                    "Could not query input devices. Please run the bootstrap first and retry.")
+            return
+        for i, d in enumerate(devices):
             if d["max_input_channels"]:
                 self.dev_box.addItem(f"[{i}] {d['name']}", i)
 
