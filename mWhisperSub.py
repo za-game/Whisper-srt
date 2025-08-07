@@ -95,6 +95,7 @@ parser.add_argument("--vad_level", type=int, default=1, choices=[0, 1, 2, 3])
 parser.add_argument("--debug_csv")
 parser.add_argument("--dbg_every", type=int, default=4)
 parser.add_argument("--log", type=int, default=0, help="0=INFO 1=詳細 2=DEBUG")
+parser.add_argument("--force_silence", action="store_true",help="忽略動態靜音立即觸發")
 
 # 3-5 寫檔策略 / 中文正規化
 parser.add_argument("--write_strategy", default="truncate", choices=["truncate", "replace"])

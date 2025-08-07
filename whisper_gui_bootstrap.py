@@ -230,9 +230,18 @@ class MainWin(qtw.QMainWindow):
             ensure_torch(py_in_venv(), self.q)
 
             self._msg("Installing other deps…")
-            deps = ["numpy","tqdm","huggingface_hub","faster-whisper",
-                    "sounddevice","webrtcvad-wheels","scipy",
-                    "opencc-python-reimplemented"]
+            deps = [
+                "numpy",
+                "tqdm",
+                "huggingface_hub",
+                "faster-whisper",
+                "sounddevice",
+                "webrtcvad-wheels",
+                "scipy",
+                "opencc-python-reimplemented",
+                "srt",
+                "PyQt5",
+            ]
             pip_install(py_in_venv(), deps, self.q, "deps")
             dest = MODEL_DIR_ROOT / tag
             if not dest.exists():
@@ -293,13 +302,24 @@ class MainWin(qtw.QMainWindow):
     # ── Run ASR + overlay ──
     def _launch_asr(self):
         dev = self.dev_box.currentData()
-        asr = [py_in_venv(), str(ENGINE_PY), "--device", str(dev), "--sr", "auto"]
+        model_dir = MODEL_DIR_ROOT / self.model_box.currentText()
+        asr = [py_in_venv(), str(ENGINE_PY), "--device", str(dev), "--sr", "auto",
+               "--model_dir", str(model_dir)]
         self.log.appendPlainText("[ASR] launching…")
-        threading.Thread(target=subprocess.Popen, args=(asr,), daemon=True).start()
+        threading.Thread(
+            target=subprocess.Popen,
+            args=(asr,),
+            kwargs={"cwd": ROOT_DIR},
+            daemon=True,
+        ).start()
 
-        overlay = [py_in_venv(), str(Path(__file__).with_name("srt_overlay_tool.py")),
-                   "live.srt","--overlay"]
-        subprocess.Popen(overlay)
+        overlay = [
+            py_in_venv(),
+            str(Path(__file__).with_name("srt_overlay_tool.py")),
+            "live.srt",
+            "--overlay",
+        ]
+        subprocess.Popen(overlay, cwd=ROOT_DIR)
         self.btn.setEnabled(True)
 
 # ───────────────────────────── main ──────────────────────────────
