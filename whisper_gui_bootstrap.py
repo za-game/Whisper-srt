@@ -17,12 +17,12 @@ from __future__ import annotations
 import importlib.util, subprocess, sys, os, re, queue, threading
 if importlib.util.find_spec("PyQt5") is None:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "PyQt5"])
-from PyQt5 import QtCore as qtc, QtWidgets as qtw
+from PyQt5 import QtCore as qtc, QtWidgets as qtw, QtGui as qtg
 from pathlib import Path
 from typing import Optional, List
 
 # 3rd-party run-time (安裝後才 import)
-from PyQt5 import QtCore as qtc, QtWidgets as qtw
+from PyQt5 import QtCore as qtc, QtWidgets as qtw, QtGui as qtg
 
 
 # ───────────────────────────── Config ─────────────────────────────
@@ -106,6 +106,7 @@ class HFDownload(qtc.QThread):
 class MainWin(qtw.QMainWindow):
     def __init__(self):
         super().__init__()
+        MODEL_DIR_ROOT.mkdir(exist_ok=True)
         self.setWindowTitle("Whisper Caption – Bootstrap")
         self.resize(720,480)
 
@@ -117,7 +118,8 @@ class MainWin(qtw.QMainWindow):
             qtw.QComboBox.showPopup(self.dev_box)
 
         self.dev_box.showPopup = showPopup
-        self.model_box = qtw.QComboBox(); self.model_box.addItems(MODELS)
+        self.model_box = qtw.QComboBox(); self._fill_models()
+        self.status = qtw.QLabel("Idle")
         self.prog = qtw.QProgressBar(); self.prog.hide()
         self.btn = qtw.QPushButton("Start")
         self.log = qtw.QPlainTextEdit(); self.log.setReadOnly(True)
@@ -125,6 +127,7 @@ class MainWin(qtw.QMainWindow):
         form = qtw.QFormLayout()
         form.addRow("Input device", self.dev_box)
         form.addRow("Model",        self.model_box)
+        form.addRow(self.status)
         form.addRow(self.prog)
         form.addRow(self.btn)
         w = qtw.QWidget(); w.setLayout(form)
@@ -135,12 +138,22 @@ class MainWin(qtw.QMainWindow):
         self.q: queue.Queue = queue.Queue()
         self.startTimer(120)      # poll queue
 
+    def _fill_models(self):
+        self.model_box.clear()
+        for name in MODELS:
+            if (MODEL_DIR_ROOT / name).exists():
+                self.model_box.addItem(name)
+            else:
+                self.model_box.addItem(f"{name} 未下載")
+                idx = self.model_box.count() - 1
+                item = self.model_box.model().item(idx)
+                if item is not None:
+                    item.setForeground(qtg.QBrush(qtc.Qt.gray))
     def _fill_devs(self):
         try:
             import sounddevice as sd
         except ImportError:
-            qtw.QMessageBox.warning(self, "Missing dependency",
-                                    "sounddevice is not installed. Please run the bootstrap first and retry.")
+            qtw.QMessageBox.warning(self, "Missing dependency","sounddevice is not installed. Please run the bootstrap first and retry.")
             return
         self.dev_box.clear()
         try:
@@ -156,9 +169,10 @@ class MainWin(qtw.QMainWindow):
     # ── Bootstrap thread ──
     def bootstrap(self):
         self.btn.setEnabled(False)
-        threading.Thread(target=self._bootstrap_worker, daemon=True).start()
+        tag = self.model_box.currentText().replace(" 未下載", "")
+        threading.Thread(target=self._bootstrap_worker, args=(tag,), daemon=True).start()
 
-    def _bootstrap_worker(self):
+    def _bootstrap_worker(self, tag: str):
         try:
             HOME_DIR.mkdir(parents=True, exist_ok=True)
             MODEL_DIR_ROOT.mkdir(parents=True, exist_ok=True)
@@ -176,8 +190,6 @@ class MainWin(qtw.QMainWindow):
                     "sounddevice","webrtcvad-wheels","scipy",
                     "opencc-python-reimplemented"]
             pip_install(py_in_venv(), deps, self.q, "deps")
-
-            tag  = self.model_box.currentText()
             dest = MODEL_DIR_ROOT / tag
             if not dest.exists():
                 self._msg(f"Downloading model {tag}…")
@@ -186,11 +198,13 @@ class MainWin(qtw.QMainWindow):
                 dl.done.connect(  lambda: self.q.put(("model",100)))
                 dl.run()
 
-            self.q.put(("done",0))
+            self.q.put(("done",tag))    
         except Exception as e:
             self.q.put(("err", str(e)))
 
-    def _msg(self, m:str): self.q.put(("msg",m))
+        def _msg(self, m:str):
+            self.status.setText(m)
+            self.q.put(("msg",m))
 
     # ── GUI polling ──
     def timerEvent(self,_):
@@ -199,14 +213,20 @@ class MainWin(qtw.QMainWindow):
                 typ,val = self.q.get_nowait()
                 if typ in ("torch","deps","model"):
                     self.prog.show(); self.prog.setValue(int(val))
+                    self.status.setText(f"{typ}: {int(val)}%")
                 elif typ=="msg":
                     self.log.appendPlainText(val); self.prog.setValue(0); self.prog.show()
+                    self.status.setText(val)
                 elif typ=="done":
                     self.prog.hide(); self.log.appendPlainText("[Bootstrap] finished ✔")
+                    self.status.setText("Finished")
                     self._fill_devs()
+                    self._fill_models()
+                    self.model_box.setCurrentText(val)
                     self._launch_asr()
                 elif typ=="err":
                     self.log.appendPlainText("[ERROR] "+val)
+                    self.status.setText(val)
                     self.btn.setEnabled(True); self.prog.hide()
         except queue.Empty:
             pass
