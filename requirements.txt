@@ -1,7 +1,0 @@
-faster_whisper==1.1.1
-numpy==2.3.2
-scipy==1.16.0
-sounddevice==0.5.2
-srt==3.5.3
-webrtcvad==2.0.10
-torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
