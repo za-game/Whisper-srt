@@ -14,7 +14,7 @@ Whisper Live Caption – GUI with One-Click Bootstrap
 """
 
 from __future__ import annotations
-import importlib.util, subprocess, sys, os, re, queue, threading, webbrowser
+import importlib.util, subprocess, sys, os, re, queue, threading, webbrowser, shutil, urllib.request, ctypes.util
 if importlib.util.find_spec("PyQt5") is None:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "PyQt5"])
 from PyQt5 import QtCore as qtc, QtWidgets as qtw, QtGui as qtg
@@ -54,6 +54,48 @@ def nvidia_cuda_version() -> Optional[str]:
         return m.group(1) if m else None
     except Exception:
         return None
+    
+def ensure_cuda():
+    """Ensure CUDA toolkit is installed and update PATH accordingly."""
+    def _has_cuda() -> bool:
+        if shutil.which("nvcc"):
+            return True
+        if os.name == "nt":
+            return bool(ctypes.util.find_library("nvcuda"))
+        return bool(ctypes.util.find_library("cuda") or ctypes.util.find_library("cudart"))
+
+    if _has_cuda():
+        return
+
+    cuda = nvidia_cuda_version()
+    ver = "12.1" if cuda and float(cuda) >= 12 else "11.8"
+    if os.name == "nt":
+        installer = ROOT_DIR / f"cuda_{ver}_windows.exe"
+        url = f"https://developer.download.nvidia.com/compute/cuda/{ver}/local_installers/cuda_{ver}_windows.exe"
+        run(["curl", "-L", "-o", str(installer), url])
+        run([str(installer), "/s"])
+        install_path = Path(f"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v{ver}")
+        bin_dir = install_path / "bin"
+        lib_dir = install_path / "lib" / "x64"
+    else:
+        installer = ROOT_DIR / f"cuda_{ver}_linux.run"
+        url = f"https://developer.download.nvidia.com/compute/cuda/{ver}/local_installers/cuda_{ver}_linux.run"
+        run(["curl", "-L", "-o", str(installer), url])
+        run(["bash", str(installer), "--silent", "--toolkit"])
+        install_path = Path(f"/usr/local/cuda-{ver}")
+        bin_dir = install_path / "bin"
+        lib_dir = install_path / "lib64"
+
+    os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + str(bin_dir) + os.pathsep + str(lib_dir)
+
+    act = VENV_DIR / ("Scripts" if os.name == "nt" else "bin") / "activate"
+    if os.name == "nt":
+        line = f"set PATH=%PATH%;{bin_dir};{lib_dir}\n"
+    else:
+        line = f"export PATH=\"$PATH:{bin_dir}:{lib_dir}\"\n"
+    if act.exists() and line not in act.read_text():
+        with act.open("a") as f:
+            f.write("\n" + line)
 
 _PERCENT = re.compile(r"(\\d{1,3})%")
 
@@ -225,6 +267,8 @@ class MainWin(qtw.QMainWindow):
                 self._msg("Creating virtualenv…")
                 run([sys.executable,"-m","venv",str(VENV_DIR)])
                 run([py_in_venv(),"-m","pip","install","--upgrade","pip","--quiet","--log"])
+            self._msg("Ensuring CUDA Toolkit…")
+            ensure_cuda()
 
             self._msg("Installing PyTorch…")
             ensure_torch(py_in_venv(), self.q)
