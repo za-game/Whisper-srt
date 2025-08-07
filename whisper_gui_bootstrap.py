@@ -23,7 +23,6 @@ from typing import Optional, List
 
 # 3rd-party run-time (安裝後才 import)
 from PyQt5 import QtCore as qtc, QtWidgets as qtw
-import sounddevice as sd
 
 # ───────────────────────────── Config ─────────────────────────────
 HOME_DIR        = Path.home() / ".whisper_caption"
@@ -130,7 +129,14 @@ class MainWin(qtw.QMainWindow):
         self.startTimer(120)      # poll queue
 
     def _fill_devs(self):
-        for i,d in enumerate(sd.query_devices()):
+        try:
+            import sounddevice as sd
+        except ImportError:
+            qtw.QMessageBox.warning(self, "Missing dependency",
+                                    "sounddevice is not installed. Please run the bootstrap first and retry.")
+            return
+        self.dev_box.clear()
+        for i, d in enumerate(sd.query_devices()):
             if d["max_input_channels"]:
                 self.dev_box.addItem(f"[{i}] {d['name']}", i)
 
@@ -184,6 +190,7 @@ class MainWin(qtw.QMainWindow):
                     self.log.appendPlainText(val); self.prog.setValue(0); self.prog.show()
                 elif typ=="done":
                     self.prog.hide(); self.log.appendPlainText("[Bootstrap] finished ✔")
+                    self._fill_devs()
                     self._launch_asr()
                 elif typ=="err":
                     self.log.appendPlainText("[ERROR] "+val)
