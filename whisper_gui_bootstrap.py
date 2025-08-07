@@ -4,7 +4,7 @@
 Whisper Live Caption – GUI with One-Click Bootstrap
 ==================================================
 首次啟動：
-1. 建立獨立 venv (~/.whisper_caption/venv)
+1. 建立獨立 venv (./venv)
 2. 偵測 NVIDIA GPU / 驅動 → 安裝對應版 PyTorch（CUDA 12.1 或 11.8）；找不到 GPU 則裝 CPU 版
 3. 安裝其餘依賴
 4. 下載 Whisper CTranslate2 模型
@@ -26,9 +26,9 @@ from PyQt5 import QtCore as qtc, QtWidgets as qtw
 
 
 # ───────────────────────────── Config ─────────────────────────────
-HOME_DIR        = Path.home() / ".whisper_caption"
-VENV_DIR        = HOME_DIR / "venv"
-MODEL_DIR_ROOT  = HOME_DIR / "models"
+ROOT_DIR       = Path(__file__).resolve().parent
+VENV_DIR       = ROOT_DIR / "venv"
+MODEL_DIR_ROOT = ROOT_DIR / "models"
 ENGINE_PY       = Path(__file__).with_name("mWhisperSub.py")
 
 MODELS = {
@@ -148,7 +148,6 @@ class MainWin(qtw.QMainWindow):
 
     def _bootstrap_worker(self):
         try:
-            HOME_DIR.mkdir(parents=True, exist_ok=True)
             MODEL_DIR_ROOT.mkdir(parents=True, exist_ok=True)
 
             if not venv_exists():
