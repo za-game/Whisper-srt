@@ -15,19 +15,29 @@ Whisper Live Caption – GUI with One-Click Bootstrap
 
 from __future__ import annotations
 import importlib.util, subprocess, sys, os, re, queue, threading, webbrowser, shutil, urllib.request, ctypes.util
+from pathlib import Path
+from typing import Optional, List
+
+ROOT_DIR       = Path(__file__).resolve().parent
+VENV_DIR       = ROOT_DIR / "venv"
+
+def _auto_venv():
+    bin_dir = "Scripts" if os.name == "nt" else "bin"
+    exe     = "python.exe" if os.name == "nt" else "python"
+    venv_py = VENV_DIR / bin_dir / exe
+    if venv_py.exists() and Path(sys.executable).resolve() != venv_py.resolve():
+        os.execv(str(venv_py), [str(venv_py)] + sys.argv)
+
+_auto_venv()
 if importlib.util.find_spec("PyQt5") is None:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "PyQt5"])
 from PyQt5 import QtCore as qtc, QtWidgets as qtw, QtGui as qtg
-from pathlib import Path
-from typing import Optional, List
 
 # 3rd-party run-time (安裝後才 import)
 from PyQt5 import QtCore as qtc, QtWidgets as qtw, QtGui as qtg
 
 
 # ───────────────────────────── Config ─────────────────────────────
-ROOT_DIR       = Path(__file__).resolve().parent
-VENV_DIR       = ROOT_DIR / "venv"
 MODEL_DIR_ROOT = ROOT_DIR / "models"
 ENGINE_PY       = Path(__file__).with_name("mWhisperSub.py")
 
