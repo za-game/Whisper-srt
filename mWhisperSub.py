@@ -57,6 +57,14 @@ _punct_re = re.compile(r"[，。？！；、,.!?;:…]")
 
 # 3. ─────────────────────────── CLI ───────────────────────────
 parser = argparse.ArgumentParser(description="Realtime Whisper→SRT 轉寫器")
+# 允許簡名映射到 HuggingFace Repo
+_REPO_MAP = {
+    "tiny": "Systran/faster-whisper-tiny",
+    "base": "Systran/faster-whisper-base",
+    "small": "Systran/faster-whisper-small",
+    "medium": "Systran/faster-whisper-medium",
+    "large-v2": "Systran/faster-whisper-large-v2",
+}
 
 # 3-1 模型與裝置
 parser.add_argument("--model_dir", default="models/medium")
@@ -100,10 +108,19 @@ parser.add_argument("--force_silence", action="store_true",help="忽略動態靜
 # 3-5 寫檔策略 / 中文正規化
 parser.add_argument("--write_strategy", default="truncate", choices=["truncate", "replace"])
 parser.add_argument("--fsync", action="store_true")
-parser.add_argument("--zh", default="t2tw", choices=["none", "t2tw", "s2t", "s2twp"])
+parser.add_argument("--zh", default="s2twp", choices=["none", "t2tw", "s2t", "s2twp"])
 
+# 3-6 SRT輸出
+parser.add_argument("--srt_path", default="live.srt",
+                    help="輸出 SRT 檔案完整路徑，預設為 live.srt")
 args = parser.parse_args()
 
+# 若給的是簡名且不是目錄，映射成正式 Repo ID
+if ("/" not in args.model_dir) and (not os.path.isdir(args.model_dir)):
+    mapped = _REPO_MAP.get(args.model_dir, args.model_dir)
+    if mapped != args.model_dir:
+        print(f"[模型] 已映射：{args.model_dir} → {mapped}")
+        args.model_dir = mapped
 if args.list_devices:
     print(sd.query_devices())
     raise SystemExit
@@ -190,15 +207,22 @@ try:
             return None
         if mode not in _cc_cache:
             _cc_cache[mode] = opencc.OpenCC(mode)
+            print(f"[OpenCC] 模式={mode} 可用=True")
         return _cc_cache[mode]
 except Exception:  # pragma: no cover
     def _get_cc(mode: str):  # type: ignore
+        print(f"[OpenCC] 模式={mode} 可用=False")
         return None
 
 
 def zh_norm(text: str) -> str:
     cc = _get_cc(args.zh)
-    return cc.convert(text) if cc else text
+    if not cc:
+        return text
+    try:
+        return cc.convert(text)
+    except Exception:
+        return text
 
 # ─────────────────────────────────────────────────────────────
 # 7. Hotwords monitoring
@@ -504,7 +528,7 @@ def _similar(a: str, b: str) -> float:
 
 
 def flush(live: List[dict]):
-    outp = Path("live.srt")
+    outp = Path(args.srt_path)
     data = srt.compose([
         srt.Subtitle(i + 1, timedelta(seconds=r["start"]), timedelta(seconds=r["end"]), r["text"])
         for i, r in enumerate(live[-800:])
@@ -576,7 +600,7 @@ try:
     while True:
         time.sleep(1)
 except KeyboardInterrupt:
-    print("\n⏹️  停止，SRT 保存在 live.srt")
+    print(f"\n⏹️  停止，SRT 保存在 {args.srt_path}")
 finally:
     if csv_fp:
         csv_fp.close()
