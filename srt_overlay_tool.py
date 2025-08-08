@@ -173,7 +173,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.setWindowOpacity(0.995)
         self.setMouseTracking(True)
-        self.setAlignment(self.settings.align | QtCore.Qt.AlignVCenter)
+        self.setAlignment(QtCore.Qt.Alignment(self.settings.align) | QtCore.Qt.AlignVCenter)
         self.setMinimumSize(self.MIN_W, self.MIN_H)
         self.setMargin(10)
 
@@ -192,7 +192,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
         # font, color, align update
         self.setFont(self.settings.font)
         self.color = self.settings.color
-        self.setAlignment(self.settings.align | QtCore.Qt.AlignVCenter)
+        self.setAlignment(QtCore.Qt.Alignment(self.settings.align) | QtCore.Qt.AlignVCenter)
         # text duration maybe recalculated on next entry
         self.repaint()
 
@@ -306,7 +306,9 @@ class Tray(QtWidgets.QSystemTrayIcon):
         self.overlay = overlay
 
     def _build_menu(self):
-        menu = QtWidgets.QMenu()
+        # 必須把 QMenu 存成屬性，否則可能被 GC，Tray 會怪怪的或消失
+        self.menu = QtWidgets.QMenu()
+        menu = self.menu
 
         # Strategy
         strat_grp = QtWidgets.QActionGroup(menu)
@@ -331,15 +333,18 @@ class Tray(QtWidgets.QSystemTrayIcon):
         path_act.triggered.connect(self._pick_path)
 
         # Align sub‑menu
-        align_menu = menu.addMenu("字幕對齊")
-        align_grp = QtWidgets.QActionGroup(align_menu)
+        # 這些子選單與群組也建議保留參考，避免被 GC
+        self.align_menu = menu.addMenu("字幕對齊")
+        align_menu = self.align_menu
+        self.align_grp = QtWidgets.QActionGroup(align_menu)
+        align_grp = self.align_grp
         for label, flag in [("靠左", QtCore.Qt.AlignLeft),
                             ("置中", QtCore.Qt.AlignCenter),
                             ("靠右", QtCore.Qt.AlignRight)]:
             act = align_menu.addAction(label)
             act.setCheckable(True)
-            act.setChecked(self.settings.align == flag)
-            act.triggered.connect(lambda _=False, f=flag: self.settings.update(align=f))
+            act.setChecked(self.settings.align == int(flag))
+            act.triggered.connect(lambda _=False, f=flag: self.settings.update(align=int(f)))
             align_grp.addAction(act) 
 
         menu.addSeparator()
