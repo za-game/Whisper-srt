@@ -97,13 +97,29 @@ def torch_wheel_exists(cuda_tag):
 def is_installed(pkg):
     return importlib.util.find_spec(pkg) is not None
 
-def run_pip(args, log_fn=None):
+def run_pip(args, log_fn=None, cancel_flag=None):
     cmd = [sys.executable, "-m", "pip"] + args
     if log_fn:
         log_fn(f"執行: {' '.join(cmd)}")
-    subprocess.check_call(cmd)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            if log_fn:
+                log_fn(line.rstrip())
+            if cancel_flag and cancel_flag():
+                proc.terminate()
+                break
+        proc.wait()
+    finally:
+        if proc.stdout:
+            proc.stdout.close()
+    if cancel_flag and cancel_flag():
+        raise RuntimeError("使用者取消")
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
 
-def install_deps(cuda_tag, log_fn=None):
+def install_deps(cuda_tag, log_fn=None, cancel_flag=None):
     pkgs = []
     if cuda_tag.startswith("cu"):
         # 安裝 PyTorch GPU 版
@@ -111,12 +127,40 @@ def install_deps(cuda_tag, log_fn=None):
             "torch", "torchvision", "torchaudio",
             "--index-url", f"https://download.pytorch.org/whl/{cuda_tag}"
         ]
-        run_pip(["install", "--upgrade"] + pkgs, log_fn=log_fn)
+        run_pip(["install", "--upgrade"] + pkgs, log_fn=log_fn, cancel_flag=cancel_flag)
     else:
         # CPU 版 PyTorch
-        run_pip(["install", "--upgrade", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu"], log_fn=log_fn)
+        run_pip(
+            [
+                "install",
+                "--upgrade",
+                "torch",
+                "torchvision",
+                "torchaudio",
+                "--index-url",
+                "https://download.pytorch.org/whl/cpu",
+            ],
+            log_fn=log_fn,
+            cancel_flag=cancel_flag,
+        )
     # faster-whisper 與 PyQt5
-    run_pip(["install", "--upgrade", "faster-whisper", "PyQt5", "sounddevice", "webrtcvad-wheels", "scipy", "opencc-python-reimplemented", "srt", "tqdm", "huggingface_hub"], log_fn=log_fn)
+    run_pip(
+        [
+            "install",
+            "--upgrade",
+            "faster-whisper",
+            "PyQt5",
+            "sounddevice",
+            "webrtcvad-wheels",
+            "scipy",
+            "opencc-python-reimplemented",
+            "srt",
+            "tqdm",
+            "huggingface_hub",
+        ],
+        log_fn=log_fn,
+        cancel_flag=cancel_flag,
+    )
 
 # ──────────── GUI ────────────
 class BootstrapWin(QtWidgets.QMainWindow):
@@ -807,11 +851,52 @@ class BootstrapWin(QtWidgets.QMainWindow):
         else:
             self.append_log("需要安裝相應套件。")
 
+    def _run_with_progress(self, title: str, task):
+        dlg = QtWidgets.QProgressDialog("處理中…", "取消", 0, 0, self)
+        dlg.setWindowTitle(title)
+        dlg.setWindowModality(QtCore.Qt.WindowModal)
+        dlg.setMinimumWidth(480)
+        bar = QtWidgets.QProgressBar(dlg)
+        bar.setRange(0, 0)
+        dlg.setBar(bar)
+        dlg.show()
+
+        cancelled = {"flag": False}
+        result = {"error": None}
+
+        def on_cancel():
+            cancelled["flag"] = True
+
+        dlg.canceled.connect(on_cancel)
+
+        def worker():
+            try:
+                task(lambda: cancelled["flag"])
+            except Exception as e:
+                result["error"] = str(e)
+            finally:
+                QtCore.QMetaObject.invokeMethod(dlg, "close", QtCore.Qt.QueuedConnection)
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        while t.is_alive():
+            QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 100)
+        if result["error"]:
+            raise RuntimeError(result["error"])
+        if cancelled["flag"]:
+            raise RuntimeError("使用者取消")
+
     def uninstall_torch_cuda(self):
         try:
             self.append_log("解除安裝 torch/CUDA…")
-            QtWidgets.QApplication.processEvents()
-            run_pip(["uninstall", "-y", "torch", "torchvision", "torchaudio"], log_fn=self.append_log)
+            self._run_with_progress(
+                "解除安裝 torch/CUDA",
+                lambda is_cancelled: run_pip(
+                    ["uninstall", "-y", "torch", "torchvision", "torchaudio"],
+                    log_fn=self.append_log,
+                    cancel_flag=is_cancelled,
+                ),
+            )
             self.append_log("解除安裝完成")
         except Exception as e:
             self.append_log(f"解除安裝失敗: {e}")
@@ -820,8 +905,14 @@ class BootstrapWin(QtWidgets.QMainWindow):
     def install_torch_cuda(self):
         try:
             self.append_log("安裝 torch/CUDA…")
-            QtWidgets.QApplication.processEvents()
-            install_deps(getattr(self, "cuda_tag", "cpu"), log_fn=self.append_log)
+            self._run_with_progress(
+                "安裝 torch/CUDA",
+                lambda is_cancelled: install_deps(
+                    getattr(self, "cuda_tag", "cpu"),
+                    log_fn=self.append_log,
+                    cancel_flag=is_cancelled,
+                ),
+            )
             self.append_log("安裝完成")
         except Exception as e:
             self.append_log(f"安裝失敗: {e}")
