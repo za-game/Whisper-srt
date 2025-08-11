@@ -851,8 +851,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
         else:
             self.append_log("需要安裝相應套件。")
 
-    def _run_with_progress(self, title: str, task):
-        dlg = QtWidgets.QProgressDialog("處理中…", "取消", 0, 0, self)
+    def _run_with_progress(self, title: str, task, label: str = "處理中…"):
+        dlg = QtWidgets.QProgressDialog(label, "取消", 0, 0, self)
         dlg.setWindowTitle(title)
         dlg.setWindowModality(QtCore.Qt.WindowModal)
         dlg.setMinimumWidth(480)
@@ -896,6 +896,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     log_fn=self.append_log,
                     cancel_flag=is_cancelled,
                 ),
+                label="解除安裝中…",
             )
             self.append_log("解除安裝完成")
         except Exception as e:
@@ -912,6 +913,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     log_fn=self.append_log,
                     cancel_flag=is_cancelled,
                 ),
+                label="安裝中…",
             )
             self.append_log("安裝完成")
         except Exception as e:
@@ -948,10 +950,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         timer.setInterval(100)
 
         def animate():
-            cur = bar.value()
-            tar = progress["target"]
-            if cur < tar:
-                bar.setValue(cur + 1)
+            bar.setValue(progress["target"])
 
         timer.timeout.connect(animate)
         timer.start()
