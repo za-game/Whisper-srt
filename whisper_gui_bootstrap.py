@@ -1495,13 +1495,15 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     self.srt_watcher.updated.connect(self.overlay.show_entry_text)
                 self.append_log(f"專案 SRT：{srt}")
         # 關鍵：不管 watcher 何時建立，都要**確保**把 updated 接到 overlay
-        try:
-            self.srt_watcher.updated.disconnect(self.overlay.show_entry_text)
-        except (TypeError, RuntimeError):
-            pass
-        self.srt_watcher.updated.connect(self.overlay.show_entry_text)
+        if self.srt_watcher and self.overlay:
+            try:
+                self.srt_watcher.updated.disconnect(self.overlay.show_entry_text)
+            except (TypeError, RuntimeError):
+                pass
+            self.srt_watcher.updated.connect(self.overlay.show_entry_text)
         # 重新觸發一次讀取（例如剛啟動）
-        self.srt_watcher._emit_latest()
+        if self.srt_watcher:
+            self.srt_watcher._emit_latest()
         
     def _graceful_terminate_proc(self, timeout=5.0):
         """優雅終止 mWhisperSub；成功回傳 True。"""
