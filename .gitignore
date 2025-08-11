@@ -183,3 +183,4 @@ cython_debug/
 /test
 live.srt
 profile.html
+/hf_models
