@@ -13,10 +13,12 @@ Whisper Live Caption – EXE 發佈專用啟動器
 from typing import Optional
 import subprocess
 import sys
+import base64
 import shutil
 import importlib.util
 from pathlib import Path
 from PyQt5 import QtCore, QtWidgets, QtGui
+from project_io import save_project, load_project
 import re
 import os
 import urllib.request
@@ -130,6 +132,8 @@ class Settings(QtCore.QObject):
         self.preview         = bool(self._qs.value("preview", False, type=bool))
         self.preview_lock    = bool(self._qs.value("preview_lock", False, type=bool))
         self.preview_text    = self._qs.value("preview_text", "觀測用預覽文字")
+        self.offset_x        = int(self._qs.value("offset_x", 0))
+        self.offset_y        = int(self._qs.value("offset_y", 0))
     def update(self, **kw):
         changed = False
         for k, v in kw.items():
@@ -165,6 +169,91 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self.display_timer = QtCore.QTimer(self); self.display_timer.setSingleShot(True)
         self.display_timer.timeout.connect(self._clear_subtitle)
         self.resize(self.minimumWidth(), self.minimumHeight())
+
+        # --- Serialization of overlay geometry and text style ---
+    def to_dict(self) -> dict:
+        g = self.geometry()
+        return {
+            "overlay": {
+                "x": g.x(), "y": g.y(), "w": g.width(), "h": g.height(),
+                "visible": self.isVisible(),
+            },
+            "text": {
+                "align": int(self.alignment()),
+                "offset_x": int(getattr(self.settings, "offset_x", 0)),
+                "offset_y": int(getattr(self.settings, "offset_y", 0)),
+                "font_family": self.settings.font.family() if hasattr(self.settings, "font") else "",
+                "font_point_size": self.settings.font.pointSize() if hasattr(self.settings, "font") else 20,
+                "color": self.settings.color.name() if isinstance(self.settings.color, QtGui.QColor) else str(self.settings.color),
+            },
+            "outline": {
+                "enabled": bool(getattr(self.settings, "outline_enabled", False)),
+                "color": self.settings.outline_color.name() if isinstance(self.settings.outline_color, QtGui.QColor) else str(self.settings.outline_color),
+                "width": int(getattr(self.settings, "outline_width", 2)),
+            },
+            "shadow": {
+                "enabled": bool(getattr(self.settings, "shadow_enabled", False)),
+                "color": self.settings.shadow_color.name() if isinstance(self.settings.shadow_color, QtGui.QColor) else str(self.settings.shadow_color),
+                "alpha": float(getattr(self.settings, "shadow_alpha", 0.5)),
+                "dist": int(getattr(self.settings, "shadow_dist", 3)),
+                "blur": int(getattr(self.settings, "shadow_blur", 6)),
+            },
+        }
+
+    def from_dict(self, d: dict):
+        d = d or {}
+        ov = d.get("overlay", {})
+        tx = d.get("text", {})
+        ol = d.get("outline", {})
+        sh = d.get("shadow", {})
+        # 幾何
+        try:
+            self.setGeometry(ov.get("x", self.x()), ov.get("y", self.y()),
+                             ov.get("w", max(50, ov.get("w", self.width()))),
+                             ov.get("h", max(30, ov.get("h", self.height()))))
+            if ov.get("visible", True):
+                self.show()
+        except Exception:
+            pass
+        # 對齊/偏移
+        try:
+            # 用 Alignment（可同時帶多旗標），避免還原後對齊失效
+            align_val = int(tx.get("align", int(self.alignment())))
+            self.setAlignment(QtCore.Qt.Alignment(align_val))
+            # 關鍵：把對齊同步進 settings，避免之後 _apply_settings() 用舊值覆蓋
+            if hasattr(self, "settings"):
+                self.settings.update(align=align_val)
+        except Exception:
+            pass
+        # 偏移寫回設定（由 Settings.update 持久化）
+        if hasattr(self, "settings"):
+            self.settings.update(
+                offset_x=int(tx.get("offset_x", getattr(self.settings, "offset_x", 0))),
+                offset_y=int(tx.get("offset_y", getattr(self.settings, "offset_y", 0))),
+            )
+        # 字體與顏色
+        try:
+            f = QtGui.QFont(self.settings.font)
+            f.setFamily(tx.get("font_family", f.family()))
+            f.setPointSize(int(tx.get("font_point_size", f.pointSize())))
+            self.settings.update(font=f)
+        except Exception:
+            pass
+        if tx.get("color"):
+            self.settings.update(color=QtGui.QColor(tx["color"]))
+        # 外框/陰影
+        self.settings.update(
+            outline_enabled=bool(ol.get("enabled", getattr(self.settings, "outline_enabled", False))),
+            outline_color=QtGui.QColor(ol.get("color", getattr(self.settings, "outline_color", QtGui.QColor("#000000")).name())),
+            outline_width=int(ol.get("width", getattr(self.settings, "outline_width", 2))),
+            shadow_enabled=bool(sh.get("enabled", getattr(self.settings, "shadow_enabled", False))),
+            shadow_color=QtGui.QColor(sh.get("color", getattr(self.settings, "shadow_color", QtGui.QColor(0,0,0,200)).name())),
+            shadow_alpha=float(sh.get("alpha", getattr(self.settings, "shadow_alpha", 0.5))),
+            shadow_dist=int(sh.get("dist", getattr(self.settings, "shadow_dist", 3))),
+            shadow_blur=int(sh.get("blur", getattr(self.settings, "shadow_blur", 6))),
+        )
+        self.update()
+
 
     def _apply_settings(self):
         self.setFont(self.settings.font)
@@ -719,6 +808,20 @@ class BootstrapWin(QtWidgets.QMainWindow):
         w.setLayout(layout)
         self.setCentralWidget(w)
         QtCore.QTimer.singleShot(100, self.check_env)
+        # project autosave
+        self._autosave_timer = QtCore.QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.timeout.connect(self._do_autosave)
+        self._autosave_pending = False
+        # 設定變更 → 觸發自動儲存（debounce）
+        self.settings.changed.connect(lambda: self.schedule_autosave(300))
+        # GUI 欄位變更也要 autosave（hotwords/srt 路徑）
+        self.hotwords_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.srt_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
+        # 主視窗移動/縮放 → autosave main_window_geometry
+        self.installEventFilter(self)
+        # 啟動時嘗試還原上次專案（使用全域 QSettings）
+        QtCore.QTimer.singleShot(0, self._auto_open_last_project)
         # —— 統一的本地模型資料夾：hf_models/<Repo> —— #
     def _repo_local_dir(self, repo_id: str) -> Path:
         d = (ROOT_DIR / "hf_models" / repo_id.replace("/", "--"))
@@ -730,7 +833,117 @@ class BootstrapWin(QtWidgets.QMainWindow):
     def closeEvent(self, ev: QtGui.QCloseEvent):
         ev.ignore()
         self.hide()
-        
+    def _auto_open_last_project(self):
+        last = self.settings._qs.value("last_project_dir", "", type=str)
+        if not last:
+            return
+        d = Path(last)
+        if not d.exists():
+            return
+        self.project_dir = d
+        self.project_name_edit.setText(d.name)
+        self.project_path_edit.setText(str(d))
+        # 嘗試載入專案（若 overlay 尚未建立，先還原 Settings；overlay 幾何會在 start 後再套用）
+        self._load_project()
+    # ---- Project persistence ----
+    def _project_path(self) -> Path | None:
+        if not getattr(self, 'project_dir', None):
+            return None
+        return Path(self.project_dir) / "overlay.mwsproj"
+
+    def _write_project(self):
+        p = self._project_path()
+        if not p:
+            return
+        payload = {
+            "app": "WhisperLiveCaption",
+            "settings": {
+                "strategy": getattr(self.settings, "strategy", "overlay"),
+                "cps": float(getattr(self.settings, "cps", 15)),
+                "fixed": float(getattr(self.settings, "fixed", 2)),
+                "preview": bool(getattr(self.settings, "preview", False)),
+            },
+            "overlay_bundle": (self.overlay.to_dict() if self.overlay else {}),
+            "gui": {
+                # 主視窗幾何（Qt 的 QByteArray → base64 字串以存 JSON）
+                "main_window_geometry": bytes(self.saveGeometry().toBase64()).decode("ascii"),
+                # 保存 GUI 關鍵路徑，開專案時可直接還原
+                "hotwords_path": self.hotwords_edit.text().strip(),
+                "srt_path": str(self.settings.srt_path) if getattr(self.settings, "srt_path", None) else "",
+            },
+        }
+        try:
+            save_project(str(p), payload)
+            self.status.appendPlainText(f"[Autosave] {p}")
+        except Exception as e:
+            self.status.appendPlainText(f"[Autosave] 失敗: {e}")
+
+    def _load_project(self):
+        p = self._project_path()
+        if not p or not p.exists():
+            return
+        try:
+            obj = load_project(str(p))
+            if 'settings' in obj:
+                self.settings.update(**obj['settings'])
+            if self.overlay and 'overlay_bundle' in obj:
+                self.overlay.from_dict(obj['overlay_bundle'])
+            # 還原 GUI 狀態（若專案內有存）
+            gui = obj.get("gui", {}) or {}
+            # 1) 主視窗幾何
+            geo_b64 = gui.get("main_window_geometry")
+            if geo_b64:
+                try:
+                    ba = QtCore.QByteArray.fromBase64(geo_b64.encode("ascii"))
+                    if not ba.isEmpty():
+                        self.restoreGeometry(ba)
+                except Exception:
+                    pass
+            # 2) Hotwords 路徑
+            hot_p = (gui.get("hotwords_path") or "").strip()
+            if hot_p:
+                self.hotwords_edit.setText(hot_p)
+            # 3) SRT 路徑（同步 settings 與 watcher）
+            srt_p = (gui.get("srt_path") or "").strip()
+            if srt_p:
+                self.srt_edit.setText(srt_p)
+                try:
+                    self.settings.update(srt_path=Path(srt_p))
+                except Exception:
+                    pass
+                # 依目前狀態重建 watcher（如尚未建立）
+                if getattr(self, "srt_watcher", None):
+                    try: self.srt_watcher.deleteLater()
+                    except Exception: pass
+                    self.srt_watcher = None
+                self.srt_watcher = LiveSRTWatcher(self.settings.srt_path, self)
+                if self.overlay:
+                    self.srt_watcher.updated.connect(self.overlay.show_entry_text)
+                    # 啟動時立即推一次目前最後一行
+                    self.srt_watcher._emit_latest()
+            self.status.appendPlainText(f"[Load] {p}")
+        except Exception as e:
+            self.status.appendPlainText(f"[Load] 失敗: {e}")
+
+    def schedule_autosave(self, delay_ms: int = 300):
+        self._autosave_pending = True
+        self._autosave_timer.start(delay_ms)
+
+    def _do_autosave(self):
+        if not self._autosave_pending:
+            return
+        self._autosave_pending = False
+        self._write_project()
+
+    def eventFilter(self, obj, ev):
+        t = ev.type()
+        # overlay 視窗移動/縮放 → autosave overlay 幾何
+        if hasattr(self, 'overlay') and obj is self.overlay and t in (QtCore.QEvent.Move, QtCore.QEvent.Resize):
+            self.schedule_autosave(200)
+        # 主視窗移動/縮放 → autosave main_window_geometry
+        if obj is self and t in (QtCore.QEvent.Move, QtCore.QEvent.Resize):
+            self.schedule_autosave(300)
+        return super().eventFilter(obj, ev)
 
     def pick_hotwords_file(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -826,6 +1039,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
             # 已存在就沿用
             proj_dir.mkdir(parents=True, exist_ok=True)
         self.project_dir = proj_dir
+        # 記住最近專案（全域 QSettings，不放在專案資料夾）
+        self.settings._qs.setValue("last_project_dir", str(proj_dir))
 
         # 3) 建立含時間戳的檔名（放在專案名稱資料夾裡）
         ts = QtCore.QDateTime.currentDateTime().toString("yyyyMMdd-hhmmss")
@@ -842,6 +1057,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
             return
         self.project_name_edit.setText(proj_name)
         self.project_path_edit.setText(str(proj_dir))
+        # 記錄全域最近專案（不放在專案資料夾）
+        self.settings._qs.setValue("last_project_dir", str(proj_dir))
         self.hot_proj_name_edit.setText(proj_name)
         self.srt_proj_name_edit.setText(proj_name)
         self.hotwords_edit.setText(str(hot_path))
@@ -862,9 +1079,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.srt_watcher.updated.connect(self.overlay.show_entry_text)
         # 聚焦：把新檔打開編輯（可選）
         # os.startfile(str(hot_path))  # 若你想自動打開
- 
+        self._load_project()
+        if self.overlay:
+            self.overlay.installEventFilter(self)
     def choose_project(self):
-        """選擇既有專案資料夾 → 自動帶入其中最新的 .txt（hotwords）與 .srt。"""
+        """選擇既有專案資料夾：優先載入專案檔；缺少才以資料夾最新檔 fallback。"""
         base_dir = (ROOT_DIR / "projects")
         base_dir.mkdir(exist_ok=True)
         p = QtWidgets.QFileDialog.getExistingDirectory(self, "選擇專案資料夾", str(base_dir))
@@ -872,32 +1091,18 @@ class BootstrapWin(QtWidgets.QMainWindow):
             return
         d = Path(p)
         self.project_dir = d
+        # 記住最近專案
         self.project_name_edit.setText(d.name)
         self.project_path_edit.setText(str(d))
+        self.settings._qs.setValue("last_project_dir", str(d))
         self.hot_proj_name_edit.setText(d.name)
         self.srt_proj_name_edit.setText(d.name)
-        # 找最新的 .txt / .srt
-        def _latest(glob_pat: str) -> Optional[Path]:
-            cands = sorted(d.glob(glob_pat), key=lambda x: x.stat().st_mtime, reverse=True)
-            return cands[0] if cands else None
-        hot = _latest("*.txt")
-        srt = _latest("*.srt")
-        if hot:
-            self.hotwords_edit.setText(str(hot))
-            self.append_log(f"專案熱詞：{hot}")
-        if srt:
-            self.srt_edit.setText(str(srt))
-            self.settings.update(srt_path=srt)
-            # 轉向 watcher
-            if self.srt_watcher:
-                try: self.srt_watcher.deleteLater()
-                except Exception: pass
-                self.srt_watcher = None
-            self.srt_watcher = LiveSRTWatcher(self.settings.srt_path, self)
-            if self.overlay:
-                self.srt_watcher.updated.connect(self.overlay.show_entry_text)
-            self.append_log(f"專案 SRT：{srt}")
-        if not hot and not srt:
+        # 先載入專案檔；若 GUI 路徑缺失，再 fallback 到資料夾內最新檔或預設
+        self._load_project()
+        self._fallback_fill_paths_from_dir(d)
+        if self.overlay:
+            self.overlay.installEventFilter(self)
+        if not self.hotwords_edit.text().strip() and not self.srt_edit.text().strip():
             self.append_log("此資料夾內未找到 .txt 或 .srt，請手動選擇。")
     def check_env(self):
         gpu_name, driver_ver = detect_gpu()
@@ -1133,6 +1338,13 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 建立內嵌 Overlay 與系統匣；主窗最小化到系統匣
         if self.overlay is None:
             self.overlay = SubtitleOverlay(self.settings)
+            # 監看 overlay 幾何（Move/Resize）→ autosave
+            self.overlay.installEventFilter(self)
+            # 載入專案（此時 overlay 已存在，幾何/樣式可套回）
+            self._load_project()
+            # 若缺少 Hotwords/SRT 路徑，從專案資料夾補齊
+            if self.project_dir:
+                self._fallback_fill_paths_from_dir(self.project_dir)
         self.overlay.show()  # 出現到桌面
         if self.tray is None:
             self.tray = Tray(self.settings, self.overlay, parent=self, on_stop=self.stop_clicked)
@@ -1148,6 +1360,32 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 except Exception:
                     pass
                 self.srt_watcher = LiveSRTWatcher(srt_path, self)
+        # ── Fallback：當專案檔沒記錄 hotwords/srt 時，從專案資料夾補上；再不行就維持預設 ──
+    def _fallback_fill_paths_from_dir(self, d: Path):
+        def _latest(glob_pat: str) -> Optional[Path]:
+            cands = sorted(d.glob(glob_pat), key=lambda x: x.stat().st_mtime, reverse=True)
+            return cands[0] if cands else None
+        # Hotwords：若尚未載入（字串為空），嘗試用資料夾最新 .txt
+        if not self.hotwords_edit.text().strip():
+            hot = _latest("*.txt")
+            if hot:
+                self.hotwords_edit.setText(str(hot))
+                self.append_log(f"專案熱詞：{hot}")
+        # SRT：若尚未載入，嘗試用資料夾最新 .srt；再不行就維持 QSettings 預設
+        if not self.srt_edit.text().strip():
+            srt = _latest("*.srt")
+            if srt:
+                self.srt_edit.setText(str(srt))
+                self.settings.update(srt_path=srt)
+                # 轉向 watcher（若此時就需要）
+                if getattr(self, "srt_watcher", None):
+                    try: self.srt_watcher.deleteLater()
+                    except Exception: pass
+                    self.srt_watcher = None
+                self.srt_watcher = LiveSRTWatcher(self.settings.srt_path, self)
+                if self.overlay:
+                    self.srt_watcher.updated.connect(self.overlay.show_entry_text)
+                self.append_log(f"專案 SRT：{srt}")
         # 關鍵：不管 watcher 何時建立，都要**確保**把 updated 接到 overlay
         try:
             self.srt_watcher.updated.disconnect(self.overlay.show_entry_text)
@@ -1156,12 +1394,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.srt_watcher.updated.connect(self.overlay.show_entry_text)
         # 重新觸發一次讀取（例如剛啟動）
         self.srt_watcher._emit_latest()
-        # 隱藏主視窗 → 系統匣
-        self.hide()
-
-        self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-
+        
     def _graceful_terminate_proc(self, timeout=5.0):
         """優雅終止 mWhisperSub；成功回傳 True。"""
         if not self.proc or self.proc.poll() is not None:
