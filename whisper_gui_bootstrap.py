@@ -124,7 +124,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("Whisper Caption – 安裝與啟動器")
         self.resize(600, 300)
-        layout = QtWidgets.QVBoxLayout()
+        main_layout = QtWidgets.QVBoxLayout()
 
         # 內嵌的設定 / overlay / 系統匣
         self.settings = Settings()
@@ -138,8 +138,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         # 模型選擇
         self.model_combo = QtWidgets.QComboBox()
-        self.model_combo.addItems(["tiny", "base", "small", "medium", "large-v2"])
+        for m in ["tiny", "base", "small", "medium", "large-v2"]:
+            self.model_combo.addItem(m, m)
         form_layout.addRow("模型", self.model_combo)
+        self.model_combo.currentIndexChanged.connect(self._on_model_changed)
 
         # 語言選擇
         self.lang_combo = QtWidgets.QComboBox()
@@ -244,31 +246,59 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.silence_spin.setValue(0.30)
         form_layout.addRow("靜音門檻 (秒)", self.silence_spin)
 
-        layout.addLayout(form_layout)
+        main_layout.addLayout(form_layout)
         self.status = QtWidgets.QPlainTextEdit()
         self.status.setReadOnly(True)
         self.status.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
-        layout.addWidget(self.status)
+        main_layout.addWidget(self.status)
 
         self.install_btn = QtWidgets.QPushButton("檢查並安裝GPU套件/下載語言模型")
         self.install_btn.clicked.connect(self.install_and_download_clicked)
-        layout.addWidget(self.install_btn)
+        main_layout.addWidget(self.install_btn)
 
         self.start_btn = QtWidgets.QPushButton("開始轉寫")
         self.start_btn.clicked.connect(self.start_clicked)
-        layout.addWidget(self.start_btn)
+        main_layout.addWidget(self.start_btn)
 
         self.stop_btn = QtWidgets.QPushButton("停止轉寫")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self.stop_clicked)
-        layout.addWidget(self.stop_btn)
+        main_layout.addWidget(self.stop_btn)
 
         self.exit_btn = QtWidgets.QPushButton("結束")
         self.exit_btn.clicked.connect(self.exit_clicked)
-        layout.addWidget(self.exit_btn)
-        w = QtWidgets.QWidget()
-        w.setLayout(layout)
-        self.setCentralWidget(w)
+        main_layout.addWidget(self.exit_btn)
+
+        main_tab = QtWidgets.QWidget()
+        main_tab.setLayout(main_layout)
+
+        env_layout = QtWidgets.QVBoxLayout()
+        self.pkg_label = QtWidgets.QLabel("torch/CUDA: 未檢測")
+        self.gpu_label = QtWidgets.QLabel("GPU: 未檢測")
+        self.driver_label = QtWidgets.QLabel("驅動版本: 未檢測")
+        env_layout.addWidget(self.pkg_label)
+        env_layout.addWidget(self.gpu_label)
+        env_layout.addWidget(self.driver_label)
+        self.detect_gpu_btn = QtWidgets.QPushButton("偵測GPU加速")
+        self.detect_gpu_btn.clicked.connect(self.check_env)
+        self.uninstall_torch_btn = QtWidgets.QPushButton("解除安裝torch/CUDA")
+        self.uninstall_torch_btn.clicked.connect(self.uninstall_torch_cuda)
+        self.install_torch_btn = QtWidgets.QPushButton("安裝torch/CUDA")
+        self.install_torch_btn.clicked.connect(self.install_torch_cuda)
+        env_layout.addWidget(self.detect_gpu_btn)
+        env_layout.addWidget(self.uninstall_torch_btn)
+        env_layout.addWidget(self.install_torch_btn)
+        env_layout.addStretch()
+        env_tab = QtWidgets.QWidget()
+        env_tab.setLayout(env_layout)
+
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.addTab(main_tab, "基本設定")
+        self.tabs.addTab(env_tab, "環境設定")
+        self.setCentralWidget(self.tabs)
+
+        self._last_model_index = self.model_combo.currentIndex()
+        self._refresh_model_items()
         QtCore.QTimer.singleShot(100, self.check_env)
         # project autosave
         self._autosave_timer = QtCore.QTimer(self)
@@ -280,7 +310,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # GUI 欄位變更也要 autosave
         self.hotwords_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.srt_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
-        self.model_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.lang_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.console_chk.toggled.connect(lambda _=None: self.schedule_autosave(300))
         self.log_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
@@ -301,6 +330,59 @@ class BootstrapWin(QtWidgets.QMainWindow):
         except Exception:
             pass
         return d
+
+    def _model_downloaded(self, name: str) -> bool:
+        local_dir = ROOT_DIR / "models" / name
+        repo = MODEL_REPO_MAP.get(name, name)
+        hf_dir = ROOT_DIR / "hf_models" / repo.replace("/", "--")
+        if local_dir.exists() and any(local_dir.iterdir()):
+            return True
+        if hf_dir.exists() and any(hf_dir.iterdir()):
+            return True
+        return False
+
+    def _refresh_model_items(self):
+        model = self.model_combo.model()
+        for i in range(self.model_combo.count()):
+            base = self.model_combo.itemData(i)
+            available = self._model_downloaded(base)
+            text = base if available else f"{base} (未下載)"
+            self.model_combo.setItemText(i, text)
+            brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
+            model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
+
+    def _set_model_name(self, name: str):
+        for i in range(self.model_combo.count()):
+            if self.model_combo.itemData(i) == name:
+                self.model_combo.blockSignals(True)
+                self.model_combo.setCurrentIndex(i)
+                self.model_combo.blockSignals(False)
+                self._last_model_index = i
+                return
+
+    def _on_model_changed(self, idx: int):
+        base = self.model_combo.itemData(idx)
+        if not self._model_downloaded(base):
+            resp = QtWidgets.QMessageBox.question(
+                self,
+                "下載模型",
+                f"模型 {base} 未下載，現在下載嗎？",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            )
+            if resp == QtWidgets.QMessageBox.Yes:
+                repo = MODEL_REPO_MAP.get(base, base)
+                try:
+                    self._download_model_with_progress(repo)
+                except Exception as e:
+                    QtWidgets.QMessageBox.warning(self, "下載失敗", str(e))
+                self._refresh_model_items()
+            else:
+                self.model_combo.blockSignals(True)
+                self.model_combo.setCurrentIndex(self._last_model_index)
+                self.model_combo.blockSignals(False)
+                return
+        self._last_model_index = self.model_combo.currentIndex()
+        self.schedule_autosave(300)
     def closeEvent(self, ev: QtGui.QCloseEvent):
         ev.ignore()
         self.hide()
@@ -369,7 +451,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 "srt_proj_name": self.srt_proj_name_edit.text().strip(),
                 "hotwords_path": self.hotwords_edit.text().strip(),
                 "srt_path": str(self.settings.srt_path) if getattr(self.settings, "srt_path", None) else "",
-                "model": self.model_combo.currentText(),
+                "model": self.model_combo.currentData(),
                 "lang": self.lang_combo.currentText(),
                 "console": bool(self.console_chk.isChecked()),
                 "log_level": self.log_level_combo.currentText(),
@@ -417,7 +499,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 self.project_path_edit.setText(proj_path)
             model = gui.get("model")
             if model:
-                self.model_combo.setCurrentText(model)
+                self._set_model_name(model)
             lang = gui.get("lang")
             if lang:
                 self.lang_combo.setCurrentText(lang)
@@ -489,6 +571,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.status.appendPlainText(f"[Load] {p}")
         except Exception as e:
             self.status.appendPlainText(f"[Load] 失敗: {e}")
+        self._refresh_model_items()
 
     def schedule_autosave(self, delay_ms: int = 300):
         self._autosave_pending = True
@@ -686,17 +769,44 @@ class BootstrapWin(QtWidgets.QMainWindow):
     def check_env(self):
         gpu_name, driver_ver = detect_gpu()
         if gpu_name:
-                    cuda_tag = recommend_cuda_version(driver_ver)
-                    self.cuda_tag = cuda_tag
-                    self.append_log(f"偵測到 GPU: {gpu_name} | 驅動: {driver_ver} | 推薦 CUDA: {cuda_tag}")
+            cuda_tag = recommend_cuda_version(driver_ver)
+            self.cuda_tag = cuda_tag
+            self.gpu_label.setText(f"GPU: {gpu_name}")
+            self.driver_label.setText(f"驅動版本: {driver_ver}")
+            self.append_log(f"偵測到 GPU: {gpu_name} | 驅動: {driver_ver} | 推薦 CUDA: {cuda_tag}")
         else:
             self.cuda_tag = "cpu"
+            self.gpu_label.setText("GPU: 無")
+            self.driver_label.setText("驅動版本: 無")
             self.append_log("未偵測到 NVIDIA GPU，將使用 CPU 模式")
 
-        if is_installed("torch") and is_installed("faster_whisper"):
+        torch_ok = is_installed("torch") and is_installed("faster_whisper")
+        state = "已安裝" if torch_ok else "未安裝"
+        self.pkg_label.setText(f"torch/CUDA: {state} (推薦 {self.cuda_tag})")
+        if torch_ok:
             self.append_log("環境已安裝，可直接啟動。")
         else:
             self.append_log("需要安裝相應套件。")
+
+    def uninstall_torch_cuda(self):
+        try:
+            self.append_log("解除安裝 torch/CUDA…")
+            QtWidgets.QApplication.processEvents()
+            run_pip(["uninstall", "-y", "torch", "torchvision", "torchaudio"], log_fn=self.append_log)
+            self.append_log("解除安裝完成")
+        except Exception as e:
+            self.append_log(f"解除安裝失敗: {e}")
+        self.check_env()
+
+    def install_torch_cuda(self):
+        try:
+            self.append_log("安裝 torch/CUDA…")
+            QtWidgets.QApplication.processEvents()
+            install_deps(getattr(self, "cuda_tag", "cpu"), log_fn=self.append_log)
+            self.append_log("安裝完成")
+        except Exception as e:
+            self.append_log(f"安裝失敗: {e}")
+        self.check_env()
 
     def install_clicked(self):
         try:
@@ -718,13 +828,14 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.append_log(f"安裝失敗: {e}")
             return
         # 2) 下載語言模型（依目前模型選擇）
-        model_name = self.model_combo.currentText().strip()
+        model_name = self.model_combo.currentData()
         repo = MODEL_REPO_MAP.get(model_name, model_name)
         self._last_repo = repo  # 記錄當前選擇，start 時可優先用本地下載資料夾
         self.append_log(f"下載模型：{repo}（已存在快取則略過）")
         try:
             self._download_model_with_progress(repo)
             self.append_log("模型檢查/下載完成。")
+            self._refresh_model_items()
         except Exception as e:
             self.append_log(f"模型下載失敗：{e}")
 
@@ -849,7 +960,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 收集參數
         args = []
         # 模型：本地有就用路徑；沒有就用名稱交給 faster-whisper 下載
-        model_name = self.model_combo.currentText()
+        model_name = self.model_combo.currentData()
         # ① 先找你既有的 models/<name> 目錄
         local_model_dir = (ROOT_DIR / "models" / model_name)
         # ② 再找我們剛剛下載到的專案本地資料夾 hf_models/<Repo>
