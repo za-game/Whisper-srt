@@ -21,8 +21,16 @@ from PyQt5 import QtCore, QtWidgets, QtGui
 from project_io import save_project, load_project
 
 # Register text cursor/block types for thread-safe queued connections
-QtCore.qRegisterMetaType(QtGui.QTextCursor)
-QtCore.qRegisterMetaType(QtGui.QTextBlock)
+_register_meta = getattr(QtCore, "qRegisterMetaType", None)
+if _register_meta is not None:  # PyQt5 with qRegisterMetaType
+    _register_meta(QtGui.QTextCursor)
+    _register_meta(QtGui.QTextBlock)
+else:  # Fallback for builds without qRegisterMetaType
+    try:
+        QtCore.QMetaType.registerType(QtGui.QTextCursor)
+        QtCore.QMetaType.registerType(QtGui.QTextBlock)
+    except Exception:
+        pass
 
 import os
 import urllib.request
