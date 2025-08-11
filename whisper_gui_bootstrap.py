@@ -193,6 +193,14 @@ class SubtitleOverlay(QtWidgets.QLabel):
         rect = self.rect().adjusted(5, 5, -5, -5)
         text = self.text()
         align = self.alignment()
+
+        # calculate bounding rect once for whole text
+        fm = QtGui.QFontMetrics(self.font())
+        br = fm.boundingRect(rect, int(align), text)
+        offx = getattr(self.settings, "offset_x", 0)
+        offy = getattr(self.settings, "offset_y", 0)
+        text_rect = br.translated(offx, offy)
+
         # 陰影（距離 + 模糊取樣）
         if self.settings.shadow_enabled and text:
             base = QtGui.QColor(self.settings.shadow_color)
@@ -203,7 +211,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
             if blur == 0:
                 sc = QtGui.QColor(base); sc.setAlphaF(a)
                 p.setPen(sc)
-                p.drawText(rect.translated(dx, dy), align, text)
+                p.drawText(text_rect.translated(dx, dy), int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop), text)
             else:
                 rings = blur
                 samples = 12
@@ -213,13 +221,13 @@ class SubtitleOverlay(QtWidgets.QLabel):
                     sc.setAlphaF(a * falloff)
                     p.setPen(sc)
                     if r == 0:
-                        p.drawText(rect.translated(dx, dy), align, text)
+                        p.drawText(text_rect.translated(dx, dy), int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop), text)
                     else:
                         for k in range(samples):
                             ang = 2 * math.pi * (k / samples)
                             ox = int(round(dx + r * math.cos(ang)))
                             oy = int(round(dy + r * math.sin(ang)))
-                            p.drawText(rect.translated(ox, oy), align, text)
+                            p.drawText(text_rect.translated(ox, oy), int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop), text)
         # 外框（多方向覆蓋達到粗細）
         if self.settings.outline_enabled and text:
             p.setPen(self.settings.outline_color)
@@ -228,10 +236,10 @@ class SubtitleOverlay(QtWidgets.QLabel):
                 for dy in range(-w, w+1):
                     if dx == 0 and dy == 0:
                         continue
-                    p.drawText(rect.translated(dx, dy), align, text)
+                    p.drawText(text_rect.translated(dx, dy), int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop), text)
         # 本體文字
         p.setPen(self._effective_color())
-        p.drawText(rect, align, text)
+        p.drawText(text_rect, int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop), text)
         if self.border_visible:
             pen = QtGui.QPen(QtGui.QColor("#CCCCCC")); pen.setWidth(2); p.setPen(pen)
             p.drawRoundedRect(self.rect().adjusted(1,1,-1,-1), 8, 8)
