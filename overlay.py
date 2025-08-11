@@ -240,24 +240,21 @@ class SubtitleOverlay(QtWidgets.QLabel):
         text = self.text()
         align = self.alignment()
 
-        # 重新計算對齊，確保超出文字框時不會錯位
+        # 重新計算對齊，即使文字超出也要保持正確位置
         fm = QtGui.QFontMetrics(self.font())
         text_w = fm.horizontalAdvance(text)
         text_h = fm.height()
         x = rect.left()
         y = rect.top()
-        # 水平對齊：若文字寬度小於可用寬度才進行對齊
-        if text_w <= rect.width():
-            if align & QtCore.Qt.AlignHCenter:
-                x = rect.left() + (rect.width() - text_w) / 2
-            elif align & QtCore.Qt.AlignRight:
-                x = rect.right() - text_w
-        # 垂直對齊：若文字高度小於可用高度才進行對齊
-        if text_h <= rect.height():
-            if align & QtCore.Qt.AlignVCenter:
-                y = rect.top() + (rect.height() - text_h) / 2
-            elif align & QtCore.Qt.AlignBottom:
-                y = rect.bottom() - text_h
+        # 根據設定的對齊方式計算文字左上角
+        if align & QtCore.Qt.AlignHCenter:
+            x = rect.left() + (rect.width() - text_w) / 2
+        elif align & QtCore.Qt.AlignRight:
+            x = rect.right() - text_w
+        if align & QtCore.Qt.AlignVCenter:
+            y = rect.top() + (rect.height() - text_h) / 2
+        elif align & QtCore.Qt.AlignBottom:
+            y = rect.bottom() - text_h
         text_rect = QtCore.QRect(int(x), int(y), int(text_w), int(text_h))
         offx = getattr(self.settings, "offset_x", 0)
         offy = getattr(self.settings, "offset_y", 0)
