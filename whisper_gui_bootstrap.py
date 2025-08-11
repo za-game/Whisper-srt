@@ -723,9 +723,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         # ───────── Hotword（專案名稱 / 路徑 / 選擇檔案 / 編輯）─────────
         hot_layout = QtWidgets.QHBoxLayout()
-        self.hot_proj_name_edit = QtWidgets.QLineEdit()
-        self.hot_proj_name_edit.setPlaceholderText("未選擇專案")
-        self.hot_proj_name_edit.setReadOnly(True)
+        self.hot_proj_name_edit = QtWidgets.QLabel("未選擇專案")
         self.hotwords_edit = QtWidgets.QLineEdit()
         self.hotwords_edit.setPlaceholderText("未選擇熱詞檔（*.txt）")
         self.hotwords_edit.setReadOnly(True)
@@ -741,9 +739,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         # ───────── SRT（專案名稱 / 路徑 / 選擇檔案 / 編輯）─────────
         srt_layout = QtWidgets.QHBoxLayout()
-        self.srt_proj_name_edit = QtWidgets.QLineEdit()
-        self.srt_proj_name_edit.setPlaceholderText("未選擇專案")
-        self.srt_proj_name_edit.setReadOnly(True)
+        self.srt_proj_name_edit = QtWidgets.QLabel("未選擇專案")
         self.srt_edit = QtWidgets.QLineEdit()
         self.srt_edit.setPlaceholderText(str(self.settings.srt_path))
         self.srt_edit.setReadOnly(True)
@@ -815,9 +811,18 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self._autosave_pending = False
         # 設定變更 → 觸發自動儲存（debounce）
         self.settings.changed.connect(lambda: self.schedule_autosave(300))
-        # GUI 欄位變更也要 autosave（hotwords/srt 路徑）
+        # GUI 欄位變更也要 autosave
         self.hotwords_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.srt_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.model_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.lang_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.console_chk.toggled.connect(lambda _=None: self.schedule_autosave(300))
+        self.log_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.zh_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.audio_device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.vad_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.silence_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
         # 主視窗移動/縮放 → autosave main_window_geometry
         self.installEventFilter(self)
         # 啟動時嘗試還原上次專案（使用全域 QSettings）
@@ -843,8 +848,20 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.project_dir = d
         self.project_name_edit.setText(d.name)
         self.project_path_edit.setText(str(d))
+        self.hot_proj_name_edit.setText(d.name)
+        self.srt_proj_name_edit.setText(d.name)
         # 嘗試載入專案（若 overlay 尚未建立，先還原 Settings；overlay 幾何會在 start 後再套用）
         self._load_project()
+        # 專案檔可能記錄了過期的 Hotwords/SRT 路徑；若檔案不存在或不在當前專案資料夾，清空後 fallback
+        hot_p = Path(self.hotwords_edit.text().strip()) if self.hotwords_edit.text().strip() else None
+        if not hot_p or not hot_p.exists() or hot_p.parent != d:
+            self.hotwords_edit.clear()
+        srt_p = Path(self.srt_edit.text().strip()) if self.srt_edit.text().strip() else None
+        if not srt_p or not srt_p.exists() or srt_p.parent != d:
+            self.srt_edit.clear()
+        # 若專案檔缺少或失效路徑，從資料夾內最新檔案補齊
+        if not self.hotwords_edit.text().strip() or not self.srt_edit.text().strip():
+            self._fallback_fill_paths_from_dir(d)
     # ---- Project persistence ----
     def _project_path(self) -> Path | None:
         if not getattr(self, 'project_dir', None):
@@ -855,6 +872,18 @@ class BootstrapWin(QtWidgets.QMainWindow):
         p = self._project_path()
         if not p:
             return
+        overlay_bundle = None
+        if self.overlay:
+            overlay_bundle = self.overlay.to_dict()
+        else:
+            # 尚未建立 overlay 時保留既有設定，避免被覆寫
+            if p.exists():
+                try:
+                    overlay_bundle = load_project(str(p)).get("overlay_bundle", {}) or {}
+                except Exception:
+                    overlay_bundle = {}
+            else:
+                overlay_bundle = {}
         payload = {
             "app": "WhisperLiveCaption",
             "settings": {
@@ -863,13 +892,27 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 "fixed": float(getattr(self.settings, "fixed", 2)),
                 "preview": bool(getattr(self.settings, "preview", False)),
             },
-            "overlay_bundle": (self.overlay.to_dict() if self.overlay else {}),
+            "overlay_bundle": overlay_bundle,
             "gui": {
                 # 主視窗幾何（Qt 的 QByteArray → base64 字串以存 JSON）
                 "main_window_geometry": bytes(self.saveGeometry().toBase64()).decode("ascii"),
-                # 保存 GUI 關鍵路徑，開專案時可直接還原
+                # 保存 GUI 關鍵路徑與設定，開專案時可直接還原
+                "project_name": self.project_name_edit.text().strip(),
+                "project_path": self.project_path_edit.text().strip(),
+                "hot_proj_name": self.hot_proj_name_edit.text().strip(),
+                "srt_proj_name": self.srt_proj_name_edit.text().strip(),
                 "hotwords_path": self.hotwords_edit.text().strip(),
                 "srt_path": str(self.settings.srt_path) if getattr(self.settings, "srt_path", None) else "",
+                "model": self.model_combo.currentText(),
+                "lang": self.lang_combo.currentText(),
+                "console": bool(self.console_chk.isChecked()),
+                "log_level": self.log_level_combo.currentText(),
+                "zh_mode": self.zh_combo.currentText(),
+                "device": self.device_combo.currentText(),
+                "audio_device_text": self.audio_device_combo.currentText(),
+                "audio_device_index": self.audio_device_combo.currentIndex(),
+                "vad_level": self.vad_level_combo.currentText(),
+                "silence": float(self.silence_spin.value()),
             },
         }
         try:
@@ -899,14 +942,70 @@ class BootstrapWin(QtWidgets.QMainWindow):
                         self.restoreGeometry(ba)
                 except Exception:
                     pass
-            # 2) Hotwords 路徑
+            # 2) 其他 GUI 設定
+            proj_name = gui.get("project_name")
+            if proj_name:
+                self.project_name_edit.setText(proj_name)
+            proj_path = gui.get("project_path")
+            if proj_path:
+                self.project_path_edit.setText(proj_path)
+            model = gui.get("model")
+            if model:
+                self.model_combo.setCurrentText(model)
+            lang = gui.get("lang")
+            if lang:
+                self.lang_combo.setCurrentText(lang)
+            console = gui.get("console")
+            if console is not None:
+                self.console_chk.setChecked(bool(console))
+            log_level = gui.get("log_level")
+            if log_level:
+                self.log_level_combo.setCurrentText(str(log_level))
+            zh_mode = gui.get("zh_mode")
+            if zh_mode:
+                self.zh_combo.setCurrentText(zh_mode)
+            device = gui.get("device")
+            if device:
+                self.device_combo.setCurrentText(device)
+            vad = gui.get("vad_level")
+            if vad:
+                self.vad_level_combo.setCurrentText(str(vad))
+            silence = gui.get("silence")
+            if silence is not None:
+                try: self.silence_spin.setValue(float(silence))
+                except Exception: pass
+            audio_text = gui.get("audio_device_text")
+            audio_idx = gui.get("audio_device_index")
+            if audio_text:
+                i = self.audio_device_combo.findText(audio_text)
+                if i >= 0:
+                    self.audio_device_combo.setCurrentIndex(i)
+                elif isinstance(audio_idx, int) and 0 <= audio_idx < self.audio_device_combo.count():
+                    self.audio_device_combo.setCurrentIndex(audio_idx)
+            elif isinstance(audio_idx, int) and 0 <= audio_idx < self.audio_device_combo.count():
+                self.audio_device_combo.setCurrentIndex(audio_idx)
+            hot_proj_name = gui.get("hot_proj_name")
+            if hot_proj_name:
+                self.hot_proj_name_edit.setText(hot_proj_name)
+            srt_proj_name = gui.get("srt_proj_name")
+            if srt_proj_name:
+                self.srt_proj_name_edit.setText(srt_proj_name)
+            # 3) Hotwords 路徑
             hot_p = (gui.get("hotwords_path") or "").strip()
             if hot_p:
                 self.hotwords_edit.setText(hot_p)
-            # 3) SRT 路徑（同步 settings 與 watcher）
+                try:
+                    self.hot_proj_name_edit.setText(Path(hot_p).parent.name)
+                except Exception:
+                    pass
+            # 4) SRT 路徑（同步 settings 與 watcher）
             srt_p = (gui.get("srt_path") or "").strip()
             if srt_p:
                 self.srt_edit.setText(srt_p)
+                try:
+                    self.srt_proj_name_edit.setText(Path(srt_p).parent.name)
+                except Exception:
+                    pass
                 try:
                     self.settings.update(srt_path=Path(srt_p))
                 except Exception:
@@ -952,6 +1051,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
         )
         if path:
             self.hotwords_edit.setText(path)
+            try:
+                self.hot_proj_name_edit.setText(Path(path).parent.name)
+            except Exception:
+                pass
             self.append_log(f"已選擇熱詞檔：{path}")
 
     def pick_srt_file(self):
@@ -961,6 +1064,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
         )
         if path:
             self.srt_edit.setText(path)
+            try:
+                self.srt_proj_name_edit.setText(Path(path).parent.name)
+            except Exception:
+                pass
             self.settings.update(srt_path=Path(path))
             # 轉向 watcher
             if self.srt_watcher:
@@ -1097,8 +1204,14 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.settings._qs.setValue("last_project_dir", str(d))
         self.hot_proj_name_edit.setText(d.name)
         self.srt_proj_name_edit.setText(d.name)
-        # 先載入專案檔；若 GUI 路徑缺失，再 fallback 到資料夾內最新檔或預設
+        # 先載入專案檔；若其中記錄的路徑已失效或不在此資料夾，清空後再以資料夾最新檔補齊
         self._load_project()
+        hot_p = Path(self.hotwords_edit.text().strip()) if self.hotwords_edit.text().strip() else None
+        if not hot_p or not hot_p.exists() or hot_p.parent != d:
+            self.hotwords_edit.clear()
+        srt_p = Path(self.srt_edit.text().strip()) if self.srt_edit.text().strip() else None
+        if not srt_p or not srt_p.exists() or srt_p.parent != d:
+            self.srt_edit.clear()
         self._fallback_fill_paths_from_dir(d)
         if self.overlay:
             self.overlay.installEventFilter(self)
@@ -1370,12 +1483,20 @@ class BootstrapWin(QtWidgets.QMainWindow):
             hot = _latest("*.txt")
             if hot:
                 self.hotwords_edit.setText(str(hot))
+                try:
+                    self.hot_proj_name_edit.setText(hot.parent.name)
+                except Exception:
+                    pass
                 self.append_log(f"專案熱詞：{hot}")
         # SRT：若尚未載入，嘗試用資料夾最新 .srt；再不行就維持 QSettings 預設
         if not self.srt_edit.text().strip():
             srt = _latest("*.srt")
             if srt:
                 self.srt_edit.setText(str(srt))
+                try:
+                    self.srt_proj_name_edit.setText(srt.parent.name)
+                except Exception:
+                    pass
                 self.settings.update(srt_path=srt)
                 # 轉向 watcher（若此時就需要）
                 if getattr(self, "srt_watcher", None):
@@ -1387,13 +1508,15 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     self.srt_watcher.updated.connect(self.overlay.show_entry_text)
                 self.append_log(f"專案 SRT：{srt}")
         # 關鍵：不管 watcher 何時建立，都要**確保**把 updated 接到 overlay
-        try:
-            self.srt_watcher.updated.disconnect(self.overlay.show_entry_text)
-        except (TypeError, RuntimeError):
-            pass
-        self.srt_watcher.updated.connect(self.overlay.show_entry_text)
+        if self.srt_watcher and self.overlay:
+            try:
+                self.srt_watcher.updated.disconnect(self.overlay.show_entry_text)
+            except (TypeError, RuntimeError):
+                pass
+            self.srt_watcher.updated.connect(self.overlay.show_entry_text)
         # 重新觸發一次讀取（例如剛啟動）
-        self.srt_watcher._emit_latest()
+        if self.srt_watcher:
+            self.srt_watcher._emit_latest()
         
     def _graceful_terminate_proc(self, timeout=5.0):
         """優雅終止 mWhisperSub；成功回傳 True。"""
