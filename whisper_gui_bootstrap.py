@@ -79,18 +79,26 @@ class LiveSRTWatcher(QtCore.QObject):
     updated = QtCore.pyqtSignal(str)  # text
     def __init__(self, srt_path: Path, parent=None):
         super().__init__(parent)
-        self.srt_path = srt_path
+        self.srt_path = Path(srt_path).resolve()
         # 確保存在，避免 QFileSystemWatcher 不觸發或第一次讀到半成品
         if not self.srt_path.exists():
             try: self.srt_path.touch(exist_ok=True)
             except Exception: pass
         self._watcher = QtCore.QFileSystemWatcher(self)
-        self._watcher.addPath(str(srt_path))
+
+         # 監看「檔案本身」+「其父資料夾」，避免 replace / 重新命名時漏事件（Windows 常見）
+        self._watcher.addPath(str(self.srt_path))
+        try:
+            self._watcher.addPath(str(self.srt_path.parent))
+        except Exception:
+            pass
+
         self._deb_timer = QtCore.QTimer(self)
         self._deb_timer.setSingleShot(True)
         self._deb_timer.setInterval(80)  # debounce
         self._deb_timer.timeout.connect(self._emit_latest)
         self._watcher.fileChanged.connect(lambda _: self._deb_timer.start())
+        self._watcher.directoryChanged.connect(lambda _: self._deb_timer.start())
         # 初次嘗試讀一次
         QtCore.QTimer.singleShot(0, self._emit_latest)
     def _emit_latest(self):
@@ -109,7 +117,7 @@ class Settings(QtCore.QObject):
         self.font     = self._qs.value("font", QtGui.QFont("Arial", 32), type=QtGui.QFont)
         self.color    = self._qs.value("color", QtGui.QColor("#FFFFFF"), type=QtGui.QColor)
         self.align    = int(self._qs.value("align", int(QtCore.Qt.AlignCenter)))
-        self.srt_path = Path(self._qs.value("srt_path", "live.srt"))
+        self.srt_path = Path(self._qs.value("srt_path", str((ROOT_DIR / "live.srt").resolve())))
         # 文字樣式（外框 / 陰影 / 預覽）
         self.outline_enabled = bool(self._qs.value("outline_enabled", False, type=bool))
         self.outline_width   = int(self._qs.value("outline_width", 2))
@@ -1122,18 +1130,24 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.tray = Tray(self.settings, self.overlay, parent=self, on_stop=self.stop_clicked)
         # 監看設定中的 srt_path → 更新最後一行到 overlay
         srt_path = self.settings.srt_path
-         # 確保 SRT 路徑可用（建立父資料夾與空檔）
-        try:
-             Path(srt_path).parent.mkdir(parents=True, exist_ok=True)
-             Path(srt_path).touch(exist_ok=True)
-        except Exception:
-             pass
         if self.srt_watcher is None:
             self.srt_watcher = LiveSRTWatcher(srt_path, self)
-            self.srt_watcher.updated.connect(self.overlay.show_entry_text)
         else:
-            # 重新觸發一次讀取（例如剛啟動）
-            self.srt_watcher._emit_latest()
+            # 若 path 變了，換一個新的 watcher（避免舊 watcher 卡在舊路徑）
+            if Path(srt_path).resolve() != Path(self.srt_watcher.srt_path).resolve():
+                try:
+                    self.srt_watcher.deleteLater()
+                except Exception:
+                    pass
+                self.srt_watcher = LiveSRTWatcher(srt_path, self)
+        # 關鍵：不管 watcher 何時建立，都要**確保**把 updated 接到 overlay
+        try:
+            self.srt_watcher.updated.disconnect(self.overlay.show_entry_text)
+        except (TypeError, RuntimeError):
+            pass
+        self.srt_watcher.updated.connect(self.overlay.show_entry_text)
+        # 重新觸發一次讀取（例如剛啟動）
+        self.srt_watcher._emit_latest()
         # 隱藏主視窗 → 系統匣
         self.hide()
 
