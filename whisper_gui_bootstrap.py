@@ -19,6 +19,11 @@ import importlib.util
 from pathlib import Path
 from PyQt5 import QtCore, QtWidgets, QtGui
 from project_io import save_project, load_project
+
+# Register text cursor/block types for thread-safe queued connections
+QtCore.qRegisterMetaType(QtGui.QTextCursor)
+QtCore.qRegisterMetaType(QtGui.QTextBlock)
+
 import os
 import urllib.request
 import sounddevice as sd
