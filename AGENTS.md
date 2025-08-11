@@ -1,7 +1,7 @@
 # AGENTS
 
 ## Code Style
-- Use Python 3.10 features allowed in project.
+- Use Python 3.11 features allowed in project.
 - Prefer double quotes for strings.
 
 ## Testing
