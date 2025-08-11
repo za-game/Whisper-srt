@@ -352,28 +352,28 @@ class SubtitleOverlay(QtWidgets.QLabel):
         # 新增：策略為 none（OBS 模式）時，若未勾選預覽 → 永遠不顯示
         if self.settings.strategy == "none" and not self.settings.preview:
             self.setText("")
-            self.adjustSize()
             self._resize_keep_anchor(max(self.minimumWidth(), 600), self.minimumHeight())
             self.repaint()
             return
         if not text.strip():
             self.setText("")
-            self.adjustSize()
             self._resize_keep_anchor(max(self.minimumWidth(), 600), self.minimumHeight())
             self.repaint()
             return
         self.setText(text)
-        self.adjustSize()
+        fm = QtGui.QFontMetrics(self.font())
+        text_w = fm.horizontalAdvance(text)
+        text_h = fm.height()
+        margin = 2 * self.margin()
         PADDING = 40
-        new_w = max(self.width() + PADDING, 600)
-        new_h = max(self.height(), self.minimumHeight())
+        new_w = max(text_w + margin + PADDING, 600)
+        new_h = max(text_h + margin, self.minimumHeight())
         self._resize_keep_anchor(new_w, new_h)
         self.repaint()
 
     def _clear_subtitle(self):
         if "overlay" != self.settings.strategy:
             self.setText("")
-            self.adjustSize()
             self._resize_keep_anchor(self.minimumWidth(), self.minimumHeight())
             self.repaint()
 
