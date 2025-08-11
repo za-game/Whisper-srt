@@ -264,6 +264,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self.stop_clicked)
         layout.addWidget(self.stop_btn)
+
+        self.exit_btn = QtWidgets.QPushButton("結束")
+        self.exit_btn.clicked.connect(self.exit_clicked)
+        layout.addWidget(self.exit_btn)
         w = QtWidgets.QWidget()
         w.setLayout(layout)
         self.setCentralWidget(w)
@@ -1026,6 +1030,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 清一下 overlay 畫面（保留視窗，避免第二次設定要再叫出）
         if self.overlay:
             self.overlay.show_entry_text("")
+
+    def exit_clicked(self):
+        if self.proc:
+            self.stop_clicked()
+        QtWidgets.QApplication.quit()
     @QtCore.pyqtSlot(str)
     def append_log(self, text: str):
         """可被跨執行緒透過 invokeMethod 呼叫的安全 log 方法"""
