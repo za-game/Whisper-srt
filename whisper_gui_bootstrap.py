@@ -118,8 +118,6 @@ class Settings(QtCore.QObject):
         self.shadow_alpha    = float(self._qs.value("shadow_alpha", 0.50))
         self.shadow_color    = self._qs.value("shadow_color", QtGui.QColor(0,0,0,200), type=QtGui.QColor)
         self.shadow_dist     = int(self._qs.value("shadow_dist", 3))   # 陰影距離（像素）
-        self.shadow_blur     = int(self._qs.value("shadow_blur", 6))   # 陰影模糊半徑（像素）
-        self.shadow_dist     = int(self._qs.value("shadow_dist", 3))   # 陰影距離（像素）
         self.shadow_blur     = int(self._qs.value("shadow_blur", 6))   # 陰影模糊（半徑）
         self.preview         = bool(self._qs.value("preview", False, type=bool))
         self.preview_lock    = bool(self._qs.value("preview_lock", False, type=bool))
@@ -224,7 +222,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
                         continue
                     p.drawText(rect.translated(dx, dy), align, text)
         # 本體文字
-        p.setPen(self.color)
+        p.setPen(self._effective_color())
         p.drawText(rect, align, text)
         if self.border_visible:
             pen = QtGui.QPen(QtGui.QColor("#CCCCCC")); pen.setWidth(2); p.setPen(pen)
@@ -333,8 +331,15 @@ class Tray(QtWidgets.QSystemTrayIcon):
         preview_act = style_menu.addAction("顯示預覽字幕")
         preview_act.setCheckable(True)
         preview_act.setChecked(self.settings.preview)
-        preview_act.toggled.connect(lambda v: self.settings.update(preview=bool(v)))
-
+        # 勾選時立刻送出預覽文字；取消時清空
+        preview_act.toggled.connect(
+            lambda v: (
+                self.settings.update(preview=bool(v)),
+                self.overlay and self.overlay.show_entry_text(self.settings.preview_text if v else "")
+            )
+        )
+        set_preview_text_act = style_menu.addAction("設定預覽文字…")
+        set_preview_text_act.triggered.connect(self._set_preview_text)
         # 顯示/主視窗
         show_act = menu.addAction("顯示主視窗")
         show_act.triggered.connect(lambda: (self.parent_window.showNormal(), self.parent_window.raise_(), self.parent_window.activateWindow()))
@@ -453,6 +458,18 @@ class Tray(QtWidgets.QSystemTrayIcon):
         )
         if ok:
             self.settings.update(shadow_blur=int(val))
+    def _set_preview_text(self):
+        """設定 overlay 預覽文字，若預覽已開啟則立即顯示"""
+        val, ok = QtWidgets.QInputDialog.getText(
+            self.parent_window,
+            "設定預覽文字",
+            "內容：",
+            text=self.settings.preview_text,
+        )
+        if ok:
+            self.settings.update(preview_text=str(val))
+            if self.settings.preview and self.overlay:
+                self.overlay.show_entry_text(self.settings.preview_text)
 
 # ──────────── 錄音設備偵測 ────────────
 def list_audio_devices():
@@ -558,6 +575,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 語言選擇
         self.lang_combo = QtWidgets.QComboBox()
         self.lang_combo.addItems(["auto", "zh", "en"])
+        self.lang_combo.setCurrentText("zh")  # 預設就是 zh
         form_layout.addRow("語言", self.lang_combo)
 
         # 終端機顯示與 log 等級
@@ -579,23 +597,60 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.zh_combo.addItems(["t2tw", "s2t", "s2twp", "none"])
         self.zh_combo.setCurrentText("s2twp")
         form_layout.addRow("中文轉換 (OpenCC)", self.zh_combo)
+        # ───────── 專案（在 Hotword / SRT 之上）─────────
+        proj_layout = QtWidgets.QHBoxLayout()
+        self.project_name_edit = QtWidgets.QLineEdit()
+        self.project_name_edit.setPlaceholderText("未選擇專案名稱")
+        self.project_name_edit.setReadOnly(True)
+        self.project_path_edit = QtWidgets.QLineEdit()
+        self.project_path_edit.setPlaceholderText("未選擇專案路徑")
+        self.project_path_edit.setReadOnly(True)
+        self.project_dir: Optional[Path] = None
+        self.pick_project_btn = QtWidgets.QPushButton("選擇專案…")
+        self.pick_project_btn.clicked.connect(self.choose_project)
+        self.new_project_btn = QtWidgets.QPushButton("新建專案…")
+        self.new_project_btn.clicked.connect(self.create_project)
+        proj_layout.addWidget(self.project_name_edit, 2)   # 專案名稱
+        proj_layout.addWidget(self.project_path_edit, 4)   # 路徑
+        proj_layout.addWidget(self.pick_project_btn, 1)    # 選擇
+        proj_layout.addWidget(self.new_project_btn, 1)     # 新建
+        form_layout.addRow("專案", proj_layout)
 
-        # 熱詞檔（顯示 + 選擇 / 編輯/ 專案）
+        # ───────── Hotword（專案名稱 / 路徑 / 選擇檔案 / 編輯）─────────
         hot_layout = QtWidgets.QHBoxLayout()
+        self.hot_proj_name_edit = QtWidgets.QLineEdit()
+        self.hot_proj_name_edit.setPlaceholderText("未選擇專案")
+        self.hot_proj_name_edit.setReadOnly(True)
         self.hotwords_edit = QtWidgets.QLineEdit()
-        self.hotwords_edit.setPlaceholderText("未選擇熱詞檔（可選）")
+        self.hotwords_edit.setPlaceholderText("未選擇熱詞檔（*.txt）")
         self.hotwords_edit.setReadOnly(True)
-        self.pick_hot_btn = QtWidgets.QPushButton("選擇熱詞檔…")
+        self.pick_hot_btn = QtWidgets.QPushButton("選擇檔案…")
         self.pick_hot_btn.clicked.connect(self.pick_hotwords_file)
         self.edit_hot_btn = QtWidgets.QPushButton("編輯")
         self.edit_hot_btn.clicked.connect(self.edit_hotwords_file)
-        self.new_project_btn = QtWidgets.QPushButton("新建專案…")
-        self.new_project_btn.clicked.connect(self.create_project)
-        hot_layout.addWidget(self.hotwords_edit)
-        hot_layout.addWidget(self.pick_hot_btn)
-        hot_layout.addWidget(self.edit_hot_btn)
-        hot_layout.addWidget(self.new_project_btn)
-        form_layout.addRow("Hotwords", hot_layout)
+        hot_layout.addWidget(self.hot_proj_name_edit, 2)   # 專案名稱
+        hot_layout.addWidget(self.hotwords_edit, 4)        # 路徑
+        hot_layout.addWidget(self.pick_hot_btn, 1)         # 選擇檔案
+        hot_layout.addWidget(self.edit_hot_btn, 1)         # 編輯
+        form_layout.addRow("Hotword", hot_layout)
+
+        # ───────── SRT（專案名稱 / 路徑 / 選擇檔案 / 編輯）─────────
+        srt_layout = QtWidgets.QHBoxLayout()
+        self.srt_proj_name_edit = QtWidgets.QLineEdit()
+        self.srt_proj_name_edit.setPlaceholderText("未選擇專案")
+        self.srt_proj_name_edit.setReadOnly(True)
+        self.srt_edit = QtWidgets.QLineEdit()
+        self.srt_edit.setPlaceholderText(str(self.settings.srt_path))
+        self.srt_edit.setReadOnly(True)
+        self.pick_srt_btn = QtWidgets.QPushButton("選擇檔案…")
+        self.pick_srt_btn.clicked.connect(self.pick_srt_file)
+        self.edit_srt_btn = QtWidgets.QPushButton("編輯")
+        self.edit_srt_btn.clicked.connect(self.edit_srt_file)
+        srt_layout.addWidget(self.srt_proj_name_edit, 2)   # 專案名稱
+        srt_layout.addWidget(self.srt_edit, 4)             # 路徑
+        srt_layout.addWidget(self.pick_srt_btn, 1)         # 選擇檔案
+        srt_layout.addWidget(self.edit_srt_btn, 1)         # 編輯
+        form_layout.addRow("SRT", srt_layout)
 
         # 裝置選擇
         self.device_combo = QtWidgets.QComboBox()
@@ -647,8 +702,15 @@ class BootstrapWin(QtWidgets.QMainWindow):
         w = QtWidgets.QWidget()
         w.setLayout(layout)
         self.setCentralWidget(w)
-
         QtCore.QTimer.singleShot(100, self.check_env)
+        # —— 統一的本地模型資料夾：hf_models/<Repo> —— #
+    def _repo_local_dir(self, repo_id: str) -> Path:
+        d = (ROOT_DIR / "hf_models" / repo_id.replace("/", "--"))
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return d
     def closeEvent(self, ev: QtGui.QCloseEvent):
         ev.ignore()
         self.hide()
@@ -662,6 +724,35 @@ class BootstrapWin(QtWidgets.QMainWindow):
         if path:
             self.hotwords_edit.setText(path)
             self.append_log(f"已選擇熱詞檔：{path}")
+
+    def pick_srt_file(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "選擇 SRT 檔案", str(self.project_dir or ROOT_DIR),
+            "SRT Files (*.srt);;All Files (*)"
+        )
+        if path:
+            self.srt_edit.setText(path)
+            self.settings.update(srt_path=Path(path))
+            # 轉向 watcher
+            if self.srt_watcher:
+                try: self.srt_watcher.deleteLater()
+                except Exception: pass
+                self.srt_watcher = None
+            self.srt_watcher = LiveSRTWatcher(self.settings.srt_path, self)
+            if self.overlay:
+                self.srt_watcher.updated.connect(self.overlay.show_entry_text)
+            self.append_log(f"已選擇 SRT：{path}")
+
+    def edit_srt_file(self):
+        p = self.srt_edit.text().strip()
+        if not p:
+            return
+        try:
+            os.startfile(p)  # Windows 預設關聯
+        except AttributeError:
+            QtWidgets.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(p))
+        except Exception as e:
+            self.append_log(f"開啟 SRT 失敗：{e}")
 
     def edit_hotwords_file(self):
         p = self.hotwords_edit.text().strip()
@@ -710,13 +801,22 @@ class BootstrapWin(QtWidgets.QMainWindow):
         )
         if not target_dir:
             return
-        target_dir = Path(target_dir)
-        # 3) 建立含時間戳的檔名
+        parent_dir = Path(target_dir)
+        # 2.5) 在所選位置底下建立「專案名稱」資料夾
+        proj_dir = parent_dir / proj_name
+        try:
+            proj_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            # 已存在就沿用
+            proj_dir.mkdir(parents=True, exist_ok=True)
+        self.project_dir = proj_dir
+
+        # 3) 建立含時間戳的檔名（放在專案名稱資料夾裡）
         ts = QtCore.QDateTime.currentDateTime().toString("yyyyMMdd-hhmmss")
         hot_fn = f"{proj_name}_{ts}.txt"
         srt_fn = f"{proj_name}_{ts}.srt"
-        hot_path = target_dir / hot_fn
-        srt_path = target_dir / srt_fn
+        hot_path = proj_dir / hot_fn
+        srt_path = proj_dir / srt_fn
         try:
             hot_path.touch(exist_ok=False)
             # SRT 先建空檔，讓 watcher 有檔可監看
@@ -724,10 +824,14 @@ class BootstrapWin(QtWidgets.QMainWindow):
         except Exception as e:
             self.append_log(f"建立專案失敗：{e}")
             return
-        # 4) 更新 GUI 與設定：hotwords 路徑、overlay 要監看的 srt 路徑
+        self.project_name_edit.setText(proj_name)
+        self.project_path_edit.setText(str(proj_dir))
+        self.hot_proj_name_edit.setText(proj_name)
+        self.srt_proj_name_edit.setText(proj_name)
         self.hotwords_edit.setText(str(hot_path))
+        self.srt_edit.setText(str(srt_path))
         self.settings.update(srt_path=srt_path)
-        self.append_log(f"已建立專案：{target_dir}")
+        self.append_log(f"已建立專案：{proj_dir}")
         self.append_log(f"Hotwords：{hot_path}")
         self.append_log(f"SRT：{srt_path}")
         # 5) 讓現有 watcher 轉向新的 srt 路徑
@@ -740,7 +844,45 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.srt_watcher = LiveSRTWatcher(self.settings.srt_path, self)
         if self.overlay:
             self.srt_watcher.updated.connect(self.overlay.show_entry_text)
-
+        # 聚焦：把新檔打開編輯（可選）
+        # os.startfile(str(hot_path))  # 若你想自動打開
+ 
+    def choose_project(self):
+        """選擇既有專案資料夾 → 自動帶入其中最新的 .txt（hotwords）與 .srt。"""
+        base_dir = (ROOT_DIR / "projects")
+        base_dir.mkdir(exist_ok=True)
+        p = QtWidgets.QFileDialog.getExistingDirectory(self, "選擇專案資料夾", str(base_dir))
+        if not p:
+            return
+        d = Path(p)
+        self.project_dir = d
+        self.project_name_edit.setText(d.name)
+        self.project_path_edit.setText(str(d))
+        self.hot_proj_name_edit.setText(d.name)
+        self.srt_proj_name_edit.setText(d.name)
+        # 找最新的 .txt / .srt
+        def _latest(glob_pat: str) -> Optional[Path]:
+            cands = sorted(d.glob(glob_pat), key=lambda x: x.stat().st_mtime, reverse=True)
+            return cands[0] if cands else None
+        hot = _latest("*.txt")
+        srt = _latest("*.srt")
+        if hot:
+            self.hotwords_edit.setText(str(hot))
+            self.append_log(f"專案熱詞：{hot}")
+        if srt:
+            self.srt_edit.setText(str(srt))
+            self.settings.update(srt_path=srt)
+            # 轉向 watcher
+            if self.srt_watcher:
+                try: self.srt_watcher.deleteLater()
+                except Exception: pass
+                self.srt_watcher = None
+            self.srt_watcher = LiveSRTWatcher(self.settings.srt_path, self)
+            if self.overlay:
+                self.srt_watcher.updated.connect(self.overlay.show_entry_text)
+            self.append_log(f"專案 SRT：{srt}")
+        if not hot and not srt:
+            self.append_log("此資料夾內未找到 .txt 或 .srt，請手動選擇。")
     def check_env(self):
         gpu_name, driver_ver = detect_gpu()
         if gpu_name:
@@ -809,6 +951,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         bar = QtWidgets.QProgressBar(dlg)
         dlg.setBar(bar)
         dlg.show()
+
         cancelled = {"flag": False}
         result = {"error": None}  # None=成功, "cancelled"=使用者取消, 其他=錯誤訊息.Lock()
 
@@ -854,28 +997,18 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         def worker():
             try:
-                # ✅ Windows：避開使用者快取的 symlink 流程，下載到專案內資料夾
-                if os.name == "nt":
-                    local_dir = (ROOT_DIR / "hf_models" / repo_id.replace("/", "--"))
-                    local_dir.mkdir(parents=True, exist_ok=True)
-                    QtCore.QMetaObject.invokeMethod(
-                        self, "append_log", QtCore.Qt.QueuedConnection,
-                        QtCore.Q_ARG(str, f"下載到本地模型資料夾：{local_dir}")
-                    )
-                    snapshot_download(
-                        repo_id=repo_id,
-                        repo_type="model",
-                        local_dir=str(local_dir),
-                        tqdm_class=QtTqdm,
-                    )
-                else:
-                    # 非 Windows：沿用預設快取（允許 symlink，省空間）
-                    snapshot_download(
-                        repo_id=repo_id,
-                        repo_type="model",
-                        local_dir=None,
-                        tqdm_class=QtTqdm,
-                    )
+                # ✅ 不分平台：一律下載到專案內的 hf_models/<Repo>
+                local_dir = self._repo_local_dir(repo_id)
+                QtCore.QMetaObject.invokeMethod(
+                    self, "append_log", QtCore.Qt.QueuedConnection,
+                    QtCore.Q_ARG(str, f"下載到本地模型資料夾：{local_dir}")
+                )
+                snapshot_download(
+                    repo_id=repo_id,
+                    repo_type="model",
+                    local_dir=str(local_dir),   # 新版 hub: 指定 local_dir 即為實體檔，無 symlink
+                    tqdm_class=QtTqdm,
+                )
             except RuntimeError as e:
                 # 只有在「真的中途取消」時才記為 cancelled
                 if "取消下載" in str(e):
@@ -921,7 +1054,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         local_model_dir = (ROOT_DIR / "models" / model_name)
         # ② 再找我們剛剛下載到的專案本地資料夾 hf_models/<Repo>
         repo = MODEL_REPO_MAP.get(model_name, model_name)
-        local_hf_dir = (ROOT_DIR / "hf_models" / repo.replace("/", "--"))
+        local_hf_dir = self._repo_local_dir(repo)
         if local_model_dir.exists():
             use_dir = local_model_dir.resolve()
             args += ["--model_dir", str(use_dir)]
@@ -934,9 +1067,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
             # 無本地資料夾 → 交給 faster-whisper 以 Repo ID 取用（會走快取）
             args += ["--model_dir", repo]
             self.append_log(f"使用 Hugging Face 模型：{repo}（若已在快取將直接重用）")
-        # 語言
-        if self.lang_combo.currentText() != "zh":
-            args += ["--lang", self.lang_combo.currentText()]
+        # 語言（你預設要 zh；UI 選擇一律明確傳遞，避免分支縮排導致漏傳）
+        args += ["--lang", self.lang_combo.currentText()]
         if self.console_chk.isChecked():
             args += ["--log", self.log_level_combo.currentText()]
         # 中文轉換（OpenCC）
@@ -990,6 +1122,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.tray = Tray(self.settings, self.overlay, parent=self, on_stop=self.stop_clicked)
         # 監看設定中的 srt_path → 更新最後一行到 overlay
         srt_path = self.settings.srt_path
+         # 確保 SRT 路徑可用（建立父資料夾與空檔）
+        try:
+             Path(srt_path).parent.mkdir(parents=True, exist_ok=True)
+             Path(srt_path).touch(exist_ok=True)
+        except Exception:
+             pass
         if self.srt_watcher is None:
             self.srt_watcher = LiveSRTWatcher(srt_path, self)
             self.srt_watcher.updated.connect(self.overlay.show_entry_text)
