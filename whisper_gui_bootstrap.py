@@ -221,6 +221,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.device_combo = QtWidgets.QComboBox()
         self.device_combo.addItems(["cuda", "cpu"])
         form_layout.addRow("裝置", self.device_combo)
+        self._update_cuda_option(False)
 
         # 錄音設備選擇（展開前自動刷新）
         self.audio_device_combo = QtWidgets.QComboBox()
@@ -314,7 +315,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.console_chk.toggled.connect(lambda _=None: self.schedule_autosave(300))
         self.log_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.zh_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
-        self.device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.device_combo.currentIndexChanged.connect(self.device_changed)
         self.audio_device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.vad_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.silence_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
@@ -670,6 +671,27 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.audio_device_combo.clear()
         for idx, label, sr in list_audio_devices():
             self.audio_device_combo.addItem(label, (idx, sr))
+
+    def _update_cuda_option(self, ready: bool):
+        item = self.device_combo.model().item(0)
+        if ready:
+            item.setText("cuda")
+            item.setForeground(QtGui.QBrush())
+            self.cuda_ready = True
+        else:
+            item.setText("cuda (未就緒)")
+            item.setForeground(QtGui.QBrush(QtGui.QColor("gray")))
+            self.cuda_ready = False
+            if self.device_combo.currentIndex() == 0:
+                self.device_combo.setCurrentText("cpu")
+
+    def device_changed(self, _=None):
+        text = self.device_combo.currentText()
+        if text.startswith("cuda") and not getattr(self, "cuda_ready", False):
+            QtWidgets.QMessageBox.information(self, "提示", "請至環境設定檢查GPU加速")
+            self.device_combo.setCurrentText("cpu")
+            return
+        self.schedule_autosave(300)
     def create_project(self):
         # 1) 讓使用者輸入專案名稱
         proj_name, ok = QtWidgets.QInputDialog.getText(
@@ -783,6 +805,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         torch_ok = is_installed("torch") and is_installed("faster_whisper")
         state = "已安裝" if torch_ok else "未安裝"
         self.pkg_label.setText(f"torch/CUDA: {state} (推薦 {self.cuda_tag})")
+        self._update_cuda_option(torch_ok and self.cuda_tag != "cpu")
         if torch_ok:
             self.append_log("環境已安裝，可直接啟動。")
         else:
