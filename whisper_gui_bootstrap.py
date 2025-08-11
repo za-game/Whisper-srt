@@ -168,9 +168,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         form_layout.addRow("中文轉換 (OpenCC)", self.zh_combo)
         # ───────── 專案（在 Hotword / SRT 之上）─────────
         proj_layout = QtWidgets.QHBoxLayout()
-        self.project_name_edit = QtWidgets.QLineEdit()
-        self.project_name_edit.setPlaceholderText("未選擇專案名稱")
-        self.project_name_edit.setReadOnly(True)
+        self.project_name_edit = QtWidgets.QLabel("未選擇專案")
         self.project_path_edit = QtWidgets.QLineEdit()
         self.project_path_edit.setPlaceholderText("未選擇專案路徑")
         self.project_path_edit.setReadOnly(True)

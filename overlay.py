@@ -332,34 +332,49 @@ class SubtitleOverlay(QtWidgets.QLabel):
             c.setAlphaF(max(0.35, min(1.0, c.alphaF() * 0.5)))
         return c
 
+    def _resize_keep_anchor(self, w: int, h: int):
+        g = self.geometry()
+        dx = w - g.width()
+        dy = h - g.height()
+        x, y = g.x(), g.y()
+        align = self.alignment()
+        if align & QtCore.Qt.AlignRight:
+            x -= dx
+        elif align & QtCore.Qt.AlignHCenter:
+            x -= dx // 2
+        if align & QtCore.Qt.AlignBottom:
+            y -= dy
+        elif align & QtCore.Qt.AlignVCenter:
+            y -= dy // 2
+        self.setGeometry(int(x), int(y), int(w), int(h))
+
     def show_entry_text(self, text: str):
         # 新增：策略為 none（OBS 模式）時，若未勾選預覽 → 永遠不顯示
         if self.settings.strategy == "none" and not self.settings.preview:
             self.setText("")
             self.adjustSize()
-            self.resize(max(self.minimumWidth(), 600), self.minimumHeight())
+            self._resize_keep_anchor(max(self.minimumWidth(), 600), self.minimumHeight())
             self.repaint()
             return
         if not text.strip():
             self.setText("")
             self.adjustSize()
-            self.resize(max(self.minimumWidth(), 600), self.minimumHeight())
+            self._resize_keep_anchor(max(self.minimumWidth(), 600), self.minimumHeight())
             self.repaint()
             return
         self.setText(text)
         self.adjustSize()
         PADDING = 40
-        self.resize(
-            max(self.width() + PADDING, 600),
-            max(self.height(), self.minimumHeight()),
-        )
+        new_w = max(self.width() + PADDING, 600)
+        new_h = max(self.height(), self.minimumHeight())
+        self._resize_keep_anchor(new_w, new_h)
         self.repaint()
 
     def _clear_subtitle(self):
         if "overlay" != self.settings.strategy:
             self.setText("")
             self.adjustSize()
-            self.resize(self.minimumWidth(), self.minimumHeight())
+            self._resize_keep_anchor(self.minimumWidth(), self.minimumHeight())
             self.repaint()
 
 
