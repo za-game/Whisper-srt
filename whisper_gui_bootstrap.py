@@ -279,6 +279,13 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.device_combo.addItems(["cuda", "cpu"])
         form_layout.addRow("裝置", self.device_combo)
         self._update_cuda_option(False)
+        # 記住上次裝置選擇（全域 QSettings）
+        self._qs = QtCore.QSettings("MyCompany", "WhisperCaption")
+        last_dev = self._qs.value("device", "cpu", type=str)
+        if last_dev == "cuda":
+            self.device_combo.setCurrentIndex(0)
+        else:
+            self.device_combo.setCurrentIndex(1)
 
         # 錄音設備選擇（展開前自動刷新）
         self.audio_device_combo = QtWidgets.QComboBox()
@@ -769,6 +776,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "提示", "請至環境設定檢查GPU加速")
             self.device_combo.setCurrentText("cpu")
             return
+        # 寫入 QSettings 以記住裝置
+        if hasattr(self, "_qs"):
+            self._qs.setValue("device", self.device_combo.currentText())
         self.schedule_autosave(300)
     def create_project(self):
         # 1) 讓使用者輸入專案名稱
@@ -1240,11 +1250,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
             return True
         try:
             if os.name == "nt":
-                # 優雅：CTRL_BREAK_EVENT（只對 CREATE_NEW_PROCESS_GROUP 有效）
-               self.proc.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
+                self.proc.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
             else:
-                # 優雅：SIGINT
-                self.proc.send_signal(signal.SIGINT)
+                self.proc.terminate()
         except Exception:
             pass
         try:
@@ -1252,17 +1260,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
             return True
         except subprocess.TimeoutExpired:
             try:
-                # 次強：terminate
-                self.proc.terminate()
+                self.proc.kill()
                 self.proc.wait(timeout=2.0)
-                return True
             except Exception:
-                try:
-                    # 最後手段：kill
-                    self.proc.kill()
-                    self.proc.wait(timeout=2.0)
-                except Exception:
-                    pass
+                pass
         return self.proc.poll() is not None
 
     def stop_clicked(self):
