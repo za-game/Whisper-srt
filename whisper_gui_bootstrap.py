@@ -304,6 +304,20 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.silence_spin.setValue(0.30)
         form_layout.addRow("靜音門檻 (秒)", self.silence_spin)
 
+        # 溫度參數（Whisper temperature）
+        self.temp_spin = QtWidgets.QDoubleSpinBox()
+        self.temp_spin.setDecimals(2)
+        self.temp_spin.setRange(0.00, 1.00)
+        self.temp_spin.setSingleStep(0.05)
+        self.temp_spin.setValue(0.00)
+        form_layout.addRow("溫度", self.temp_spin)
+
+        # 抑制 Tokens（逗號分隔的 token ID）
+        self.suppress_edit = QtWidgets.QLineEdit()
+        self.suppress_edit.setPlaceholderText("-1")
+        self.suppress_edit.setText("-1")
+        form_layout.addRow("抑制 Tokens", self.suppress_edit)
+
         main_layout.addLayout(form_layout)
         self.status = QtWidgets.QPlainTextEdit()
         self.status.setReadOnly(True)
@@ -372,6 +386,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.audio_device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.vad_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.silence_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.temp_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.suppress_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
         # 主視窗移動/縮放 → autosave main_window_geometry
         self.installEventFilter(self)
         # 啟動時嘗試還原上次專案（使用全域 QSettings）
@@ -515,6 +531,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 "audio_device_index": self.audio_device_combo.currentIndex(),
                 "vad_level": self.vad_level_combo.currentText(),
                 "silence": float(self.silence_spin.value()),
+                "temperature": float(self.temp_spin.value()),
+                "suppress_tokens": self.suppress_edit.text().strip(),
             },
         }
         try:
@@ -576,6 +594,13 @@ class BootstrapWin(QtWidgets.QMainWindow):
             if silence is not None:
                 try: self.silence_spin.setValue(float(silence))
                 except Exception: pass
+            temperature = gui.get("temperature")
+            if temperature is not None:
+                try: self.temp_spin.setValue(float(temperature))
+                except Exception: pass
+            suppress = gui.get("suppress_tokens")
+            if suppress is not None:
+                self.suppress_edit.setText(str(suppress))
             audio_text = gui.get("audio_device_text")
             audio_idx = gui.get("audio_device_index")
             if audio_text:
@@ -1119,6 +1144,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 傳遞 VAD 相關參數（永遠顯式傳遞，避免預設值不明）
         args += ["--vad_level", self.vad_level_combo.currentText()]
         args += ["--silence", f"{self.silence_spin.value():.2f}"]
+        args += ["--temperature", f"{self.temp_spin.value():.2f}"]
+        suppress = self.suppress_edit.text().strip()
+        if suppress:
+            args += ["--suppress_tokens", suppress]
         # 啟動 mWhisperSub（在 Windows 上讓它進入新的 process group，之後可用 CTRL_BREAK_EVENT 做優雅關閉）
         popen_kwargs = {"cwd": ROOT_DIR}
         if os.name == "nt":
@@ -1158,6 +1187,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 except Exception:
                     pass
                 self.srt_watcher = LiveSRTWatcher(srt_path, self)
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
         # ── Fallback：當專案檔沒記錄 hotwords/srt 時，從專案資料夾補上；再不行就維持預設 ──
     def _fallback_fill_paths_from_dir(self, d: Path):
         def _latest(glob_pat: str) -> Optional[Path]:

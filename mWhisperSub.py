@@ -87,6 +87,9 @@ parser.add_argument("--maxhop", type=float, default=2.0, help="最長 MAXHOP 間
 parser.add_argument("--silence", type=float, default=0.3, help="靜音句間隔下限")
 parser.add_argument("--beam", type=int, default=3)
 parser.add_argument("--best_of", type=int, default=1)
+parser.add_argument("--temperature", type=float, default=0.0)
+parser.add_argument("--suppress_tokens", default="-1",
+                    help="以逗號分隔的 token ID，例如 '-1,0,1'")
 parser.add_argument("--min_chars", type=int, default=9)
 parser.add_argument("--max_chars", type=int, default=16)
 parser.add_argument("--min_infer_gap", type=float, default=0.8)
@@ -114,6 +117,7 @@ parser.add_argument("--zh", default="s2twp", choices=["none", "t2tw", "s2t", "s2
 parser.add_argument("--srt_path", default="live.srt",
                     help="輸出 SRT 檔案完整路徑，預設為 live.srt")
 args = parser.parse_args()
+SUPPRESS_TOKENS = [int(x) for x in str(args.suppress_tokens).split(",") if x.strip()]
 
 # 若給的是簡名且不是目錄，映射成正式 Repo ID
 if ("/" not in args.model_dir) and (not os.path.isdir(args.model_dir)):
@@ -265,8 +269,14 @@ def get_prompt() -> str | None:
 # ─────────────────────────────────────────────────────────────
 if args.input_file:
     segs, _ = model.transcribe(
-        args.input_file, language=args.lang, beam_size=args.beam, best_of=args.best_of,
-        word_timestamps=True, initial_prompt=get_prompt(),
+        args.input_file,
+        language=args.lang,
+        beam_size=args.beam,
+        best_of=args.best_of,
+        temperature=args.temperature,
+        suppress_tokens=SUPPRESS_TOKENS,
+        word_timestamps=True,
+        initial_prompt=get_prompt(),
     )
     subs = []
     for i, s in enumerate(segs, 1):
@@ -494,8 +504,14 @@ def consumer_worker():
 
             with model_lock:
                 segments, _ = model.transcribe(
-                    pcm_f, language=args.lang, beam_size=args.beam, best_of=args.best_of,
-                    condition_on_previous_text=False, word_timestamps=True,
+                    pcm_f,
+                    language=args.lang,
+                    beam_size=args.beam,
+                    best_of=args.best_of,
+                    temperature=args.temperature,
+                    suppress_tokens=SUPPRESS_TOKENS,
+                    condition_on_previous_text=False,
+                    word_timestamps=True,
                     initial_prompt=use_prompt,
                 )
 
