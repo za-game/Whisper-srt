@@ -1190,10 +1190,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 指定 SRT 輸出路徑（搭配 mWhisperSub 的 --srt_path）
         if self.settings.srt_path:
             args += ["--srt_path", str(self.settings.srt_path)]
-            try:
-                Path(self.settings.srt_path).write_text("", encoding="utf-8")
-            except Exception:
-                pass
         # GPU 選擇
         if self.device_combo.currentText().startswith("cuda"):
             gpu_idx = self.gpu_combo.currentData()
