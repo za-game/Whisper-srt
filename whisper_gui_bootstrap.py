@@ -79,6 +79,18 @@ def detect_gpu():
     except Exception:
         return None, None
 
+def list_gpus():
+    if not shutil.which("nvidia-smi"):
+        return []
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            encoding="utf-8",
+        )
+        return [n.strip() for n in out.splitlines() if n.strip()]
+    except Exception:
+        return []
+
 def recommend_cuda_version(driver_version):
     try:
         major = int(driver_version.split(".")[0])
@@ -280,6 +292,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
         form_layout.addRow("裝置", self.device_combo)
         self._update_cuda_option(False)
 
+        # GPU 選擇
+        self.gpu_combo = QtWidgets.QComboBox()
+        self.refresh_gpu_list()
+        self.gpu_combo.setEnabled(self.device_combo.currentText().startswith("cuda"))
+        form_layout.addRow("GPU", self.gpu_combo)
+
         # 錄音設備選擇（展開前自動刷新）
         self.audio_device_combo = QtWidgets.QComboBox()
         form_layout.addRow("錄音設備", self.audio_device_combo)
@@ -369,6 +387,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.log_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.zh_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.device_combo.currentIndexChanged.connect(self.device_changed)
+        self.gpu_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.audio_device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.vad_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.silence_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
@@ -510,7 +529,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 "console": bool(self.console_chk.isChecked()),
                 "log_level": self.log_level_combo.currentText(),
                 "zh_mode": self.zh_combo.currentText(),
-                "device": self.device_combo.currentText(),
+                "device": "cuda" if self.device_combo.currentText().startswith("cuda") else "cpu",
+                "gpu_index": self.gpu_combo.currentIndex(),
                 "audio_device_text": self.audio_device_combo.currentText(),
                 "audio_device_index": self.audio_device_combo.currentIndex(),
                 "vad_level": self.vad_level_combo.currentText(),
@@ -568,7 +588,13 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 self.zh_combo.setCurrentText(zh_mode)
             device = gui.get("device")
             if device:
-                self.device_combo.setCurrentText(device)
+                if str(device).startswith("cuda"):
+                    self.device_combo.setCurrentIndex(0)
+                else:
+                    self.device_combo.setCurrentText(str(device))
+            gpu_idx = gui.get("gpu_index")
+            if isinstance(gpu_idx, int) and 0 <= gpu_idx < self.gpu_combo.count():
+                self.gpu_combo.setCurrentIndex(gpu_idx)
             vad = gui.get("vad_level")
             if vad:
                 self.vad_level_combo.setCurrentText(str(vad))
@@ -725,6 +751,15 @@ class BootstrapWin(QtWidgets.QMainWindow):
         for idx, label, sr in list_audio_devices():
             self.audio_device_combo.addItem(label, (idx, sr))
 
+    def refresh_gpu_list(self):
+        self.gpu_combo.clear()
+        names = list_gpus()
+        if names:
+            for idx, name in enumerate(names):
+                self.gpu_combo.addItem(name, idx)
+        else:
+            self.gpu_combo.addItem("無 GPU", -1)
+
     def _update_cuda_option(self, ready: bool):
         item = self.device_combo.model().item(0)
         if ready:
@@ -735,15 +770,14 @@ class BootstrapWin(QtWidgets.QMainWindow):
             item.setText("cuda (未就緒)")
             item.setForeground(QtGui.QBrush(QtGui.QColor("gray")))
             self.cuda_ready = False
-            if self.device_combo.currentIndex() == 0:
-                self.device_combo.setCurrentText("cpu")
 
     def device_changed(self, _=None):
         text = self.device_combo.currentText()
         if text.startswith("cuda") and not getattr(self, "cuda_ready", False):
             QtWidgets.QMessageBox.information(self, "提示", "請至環境設定檢查GPU加速")
             self.device_combo.setCurrentText("cpu")
-            return
+            text = "cpu"
+        self.gpu_combo.setEnabled(text.startswith("cuda"))
         self.schedule_autosave(300)
     def create_project(self):
         # 1) 讓使用者輸入專案名稱
@@ -843,6 +877,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.append_log("此資料夾內未找到 .txt 或 .srt，請手動選擇。")
     def check_env(self):
         gpu_name, driver_ver = detect_gpu()
+        self.refresh_gpu_list()
         if gpu_name:
             cuda_tag = recommend_cuda_version(driver_ver)
             self.cuda_tag = cuda_tag
@@ -1103,8 +1138,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
         if self.settings.srt_path:
             args += ["--srt_path", str(self.settings.srt_path)]
         # GPU 選擇
-        if self.device_combo.currentText() == "cuda":
-            args += ["--gpu", "0"]
+        if self.device_combo.currentText().startswith("cuda"):
+            gpu_idx = self.gpu_combo.currentData()
+            if gpu_idx is None or gpu_idx < 0:
+                gpu_idx = 0
+            args += ["--gpu", str(gpu_idx)]
         else:
             args += ["--gpu", "-1"]
 
