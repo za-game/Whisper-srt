@@ -1,4 +1,4 @@
-import json, os, tempfile, time
+import json, os, tempfile, shutil, time
 
 SCHEMA_VERSION = 1
 
@@ -22,9 +22,6 @@ def save_project(path: str, payload: dict):
     _atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 def load_project(path: str) -> dict:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            obj = json.load(f)
-        return obj or {}
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        obj = json.load(f)
+    return obj or {}

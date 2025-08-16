@@ -42,8 +42,7 @@ from overlay import Settings, SubtitleOverlay, Tray
 from srt_utils import LiveSRTWatcher
 ROOT_DIR = Path(__file__).resolve().parent
 ENGINE_PY = ROOT_DIR / "mWhisperSub.py"
-# Path to the overlay module
-OVERLAY_PY = ROOT_DIR / "overlay.py"
+OVERLAY_PY = ROOT_DIR / "srt_overlay_tool.py"
 
 # Systran faster-whisper 對應表（UI 簡名 -> HF Repo ID）
 MODEL_REPO_MAP = {
@@ -280,13 +279,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.device_combo.addItems(["cuda", "cpu"])
         form_layout.addRow("裝置", self.device_combo)
         self._update_cuda_option(False)
-        # 記住上次裝置選擇（全域 QSettings）
-        self._qs = QtCore.QSettings("MyCompany", "WhisperCaption")
-        last_dev = self._qs.value("device", "cpu", type=str)
-        if last_dev == "cuda":
-            self.device_combo.setCurrentIndex(0)
-        else:
-            self.device_combo.setCurrentIndex(1)
 
         # 錄音設備選擇（展開前自動刷新）
         self.audio_device_combo = QtWidgets.QComboBox()
@@ -311,20 +303,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.silence_spin.setSingleStep(0.05)
         self.silence_spin.setValue(0.30)
         form_layout.addRow("靜音門檻 (秒)", self.silence_spin)
-
-        # 溫度參數（Whisper temperature）
-        self.temp_spin = QtWidgets.QDoubleSpinBox()
-        self.temp_spin.setDecimals(2)
-        self.temp_spin.setRange(0.00, 1.00)
-        self.temp_spin.setSingleStep(0.05)
-        self.temp_spin.setValue(0.00)
-        form_layout.addRow("溫度", self.temp_spin)
-
-        # 抑制 Tokens（逗號分隔的 token ID）
-        self.suppress_edit = QtWidgets.QLineEdit()
-        self.suppress_edit.setPlaceholderText("-1")
-        self.suppress_edit.setText("-1")
-        form_layout.addRow("抑制 Tokens", self.suppress_edit)
 
         main_layout.addLayout(form_layout)
         self.status = QtWidgets.QPlainTextEdit()
@@ -386,7 +364,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # GUI 欄位變更也要 autosave
         self.hotwords_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.srt_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
-        self.model_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.lang_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.console_chk.toggled.connect(lambda _=None: self.schedule_autosave(300))
         self.log_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
@@ -395,8 +372,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.audio_device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.vad_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.silence_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
-        self.temp_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
-        self.suppress_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
         # 主視窗移動/縮放 → autosave main_window_geometry
         self.installEventFilter(self)
         # 啟動時嘗試還原上次專案（使用全域 QSettings）
@@ -540,8 +515,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 "audio_device_index": self.audio_device_combo.currentIndex(),
                 "vad_level": self.vad_level_combo.currentText(),
                 "silence": float(self.silence_spin.value()),
-                "temperature": float(self.temp_spin.value()),
-                "suppress_tokens": self.suppress_edit.text().strip(),
             },
         }
         try:
@@ -603,13 +576,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
             if silence is not None:
                 try: self.silence_spin.setValue(float(silence))
                 except Exception: pass
-            temperature = gui.get("temperature")
-            if temperature is not None:
-                try: self.temp_spin.setValue(float(temperature))
-                except Exception: pass
-            suppress = gui.get("suppress_tokens")
-            if suppress is not None:
-                self.suppress_edit.setText(str(suppress))
             audio_text = gui.get("audio_device_text")
             audio_idx = gui.get("audio_device_index")
             if audio_text:
@@ -778,9 +744,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "提示", "請至環境設定檢查GPU加速")
             self.device_combo.setCurrentText("cpu")
             return
-        # 寫入 QSettings 以記住裝置
-        if hasattr(self, "_qs"):
-            self._qs.setValue("device", self.device_combo.currentText())
         self.schedule_autosave(300)
     def create_project(self):
         # 1) 讓使用者輸入專案名稱
@@ -1156,10 +1119,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 傳遞 VAD 相關參數（永遠顯式傳遞，避免預設值不明）
         args += ["--vad_level", self.vad_level_combo.currentText()]
         args += ["--silence", f"{self.silence_spin.value():.2f}"]
-        args += ["--temperature", f"{self.temp_spin.value():.2f}"]
-        suppress = self.suppress_edit.text().strip()
-        if suppress:
-            args += ["--suppress_tokens", suppress]
         # 啟動 mWhisperSub（在 Windows 上讓它進入新的 process group，之後可用 CTRL_BREAK_EVENT 做優雅關閉）
         popen_kwargs = {"cwd": ROOT_DIR}
         if os.name == "nt":
@@ -1199,8 +1158,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 except Exception:
                     pass
                 self.srt_watcher = LiveSRTWatcher(srt_path, self)
-        self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
         # ── Fallback：當專案檔沒記錄 hotwords/srt 時，從專案資料夾補上；再不行就維持預設 ──
     def _fallback_fill_paths_from_dir(self, d: Path):
         def _latest(glob_pat: str) -> Optional[Path]:
@@ -1252,9 +1209,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
             return True
         try:
             if os.name == "nt":
-                self.proc.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
+                # 優雅：CTRL_BREAK_EVENT（只對 CREATE_NEW_PROCESS_GROUP 有效）
+               self.proc.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
             else:
-                self.proc.terminate()
+                # 優雅：SIGINT
+                self.proc.send_signal(signal.SIGINT)
         except Exception:
             pass
         try:
@@ -1262,10 +1221,17 @@ class BootstrapWin(QtWidgets.QMainWindow):
             return True
         except subprocess.TimeoutExpired:
             try:
-                self.proc.kill()
+                # 次強：terminate
+                self.proc.terminate()
                 self.proc.wait(timeout=2.0)
+                return True
             except Exception:
-                pass
+                try:
+                    # 最後手段：kill
+                    self.proc.kill()
+                    self.proc.wait(timeout=2.0)
+                except Exception:
+                    pass
         return self.proc.poll() is not None
 
     def stop_clicked(self):

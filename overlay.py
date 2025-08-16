@@ -349,10 +349,6 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self.setGeometry(int(x), int(y), int(w), int(h))
 
     def show_entry_text(self, text: str):
-        if self.settings.preview:
-            self.display_timer.stop()
-            if text != self.settings.preview_text:
-                return
         # 新增：策略為 none（OBS 模式）時，若未勾選預覽 → 永遠不顯示
         if self.settings.strategy == "none" and not self.settings.preview:
             self.setText("")
@@ -549,7 +545,7 @@ class Tray(QtWidgets.QSystemTrayIcon):
             self.settings.update(fixed=val)
 
     def _pick_font(self):
-        font, ok = QtWidgets.QFontDialog.getFont(self.settings.font, self.parent_window)
+        ok, font = QtWidgets.QFontDialog.getFont(self.settings.font, self.parent_window)
         if ok:
             self.settings.update(font=font)
 
