@@ -388,6 +388,7 @@ pause_hist: Deque[float] = deque(maxlen=30)
 last_state = False; last_change_ts = 0.0
 
 DEDUP_WIN = 3.0; SIM_THR = 0.85; MERGE_WIN = 1.0
+LONG_SPEECH_S = 2.0
 
 if FS_IN not in SUPPORTED_VAD_SR:
     log.warning("裝置採樣率 %d Hz 不是 VAD 支援值，將自動重採樣到 48k", FS_IN)
@@ -470,10 +471,12 @@ def trigger_worker():
             last_vad_speech, seen_speech = mono, True
 
         reason = None
-        if seen_speech and not speech and (mono - last_vad_speech) >= dyn_sil:
-            reason = "VAD"
-        elif speech and (anow - last_trigger_aud) >= max(MAXHOP_S, args.min_infer_gap):
-            reason = "MAXHOP"
+        allow_infer = not (speech and (mono - last_change_ts) > LONG_SPEECH_S)
+        if allow_infer:
+            if seen_speech and not speech and (mono - last_vad_speech) >= dyn_sil:
+                reason = "VAD"
+            elif speech and (anow - last_trigger_aud) >= max(MAXHOP_S, args.min_infer_gap):
+                reason = "MAXHOP"
 
         if args.log >= 2 and tick % args.dbg_every == 0:
             log.debug("rms %.1f  noise %.1f  thr %.1f  vad %d  speech %d  dyn_sil %.2f",
