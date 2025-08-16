@@ -42,7 +42,7 @@ def parse_srt_last_text(path: Path) -> str:
 class LiveSRTWatcher(QtCore.QObject):
     updated = QtCore.pyqtSignal(str)  # text
 
-    def __init__(self, srt_path: Path, parent=None):
+    def __init__(self, srt_path: Path, parent=None, initial_emit: bool = False):
         super().__init__(parent)
         self.srt_path = Path(srt_path).resolve()
         if not self.srt_path.exists():
@@ -63,7 +63,8 @@ class LiveSRTWatcher(QtCore.QObject):
         self._deb_timer.timeout.connect(self._emit_latest)
         self._watcher.fileChanged.connect(lambda _: self._deb_timer.start())
         self._watcher.directoryChanged.connect(lambda _: self._deb_timer.start())
-        QtCore.QTimer.singleShot(0, self._emit_latest)
+        if initial_emit:
+            QtCore.QTimer.singleShot(0, self._emit_latest)
 
     def _emit_latest(self):
         text = parse_srt_last_text(self.srt_path)

@@ -676,8 +676,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 self.srt_watcher = LiveSRTWatcher(self.settings.srt_path, self)
                 if self.overlay:
                     self.srt_watcher.updated.connect(self.overlay.show_entry_text)
-                    # 啟動時立即推一次目前最後一行
-                    self.srt_watcher._emit_latest()
             self.status.appendPlainText(f"[Load] {p}")
         except Exception as e:
             self.status.appendPlainText(f"[Load] 失敗: {e}")
@@ -1192,6 +1190,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 指定 SRT 輸出路徑（搭配 mWhisperSub 的 --srt_path）
         if self.settings.srt_path:
             args += ["--srt_path", str(self.settings.srt_path)]
+            try:
+                Path(self.settings.srt_path).write_text("", encoding="utf-8")
+            except Exception:
+                pass
         # GPU 選擇
         if self.device_combo.currentText().startswith("cuda"):
             gpu_idx = self.gpu_combo.currentData()
@@ -1246,6 +1248,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             if self.project_dir:
                 self._fallback_fill_paths_from_dir(self.project_dir)
         self.overlay.show()  # 出現到桌面
+        self.overlay.show_entry_text("")
         if self.tray is None:
             self.tray = Tray(self.settings, self.overlay, parent=self, on_stop=self.stop_clicked)
         # 監看設定中的 srt_path → 更新最後一行到 overlay
@@ -1301,9 +1304,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
             except (TypeError, RuntimeError):
                 pass
             self.srt_watcher.updated.connect(self.overlay.show_entry_text)
-        # 重新觸發一次讀取（例如剛啟動）
-        if self.srt_watcher:
-            self.srt_watcher._emit_latest()
         
     def _graceful_terminate_proc(self, timeout=5.0):
         """優雅終止 mWhisperSub；成功回傳 True。"""

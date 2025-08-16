@@ -374,6 +374,13 @@ class SubtitleOverlay(QtWidgets.QLabel):
         new_h = max(text_h + margin, self.minimumHeight())
         self._resize_keep_anchor(new_w, new_h)
         self.repaint()
+        if self.settings.strategy == "cps":
+            ms = max(0, int(1000 * len(text) / max(1.0, self.settings.cps)))
+            self.display_timer.start(ms)
+        elif self.settings.strategy == "fixed":
+            self.display_timer.start(int(self.settings.fixed * 1000))
+        else:
+            self.display_timer.stop()
 
     def _clear_subtitle(self):
         if self.settings.preview:
