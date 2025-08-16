@@ -296,6 +296,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.vad_level_combo.setCurrentText("1")
         form_layout.addRow("VAD 等級", self.vad_level_combo)
 
+        # VOD 模式
+        self.vod_mode_combo = QtWidgets.QComboBox()
+        self.vod_mode_combo.addItems(["Auto", "Off"])
+        self.vod_mode_combo.setCurrentText("Off")
+        form_layout.addRow("VOD 模式", self.vod_mode_combo)
+
         # 靜音門檻秒數（mWhisperSub: --silence，預設 0.3）
         self.silence_spin = QtWidgets.QDoubleSpinBox()
         self.silence_spin.setDecimals(2)
@@ -371,6 +377,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.device_combo.currentIndexChanged.connect(self.device_changed)
         self.audio_device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.vad_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.vod_mode_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.silence_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
         # 主視窗移動/縮放 → autosave main_window_geometry
         self.installEventFilter(self)
@@ -514,6 +521,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 "audio_device_text": self.audio_device_combo.currentText(),
                 "audio_device_index": self.audio_device_combo.currentIndex(),
                 "vad_level": self.vad_level_combo.currentText(),
+                "vod_mode": self.vod_mode_combo.currentText(),
                 "silence": float(self.silence_spin.value()),
             },
         }
@@ -572,6 +580,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
             vad = gui.get("vad_level")
             if vad:
                 self.vad_level_combo.setCurrentText(str(vad))
+            vod_mode = gui.get("vod_mode")
+            if vod_mode:
+                self.vod_mode_combo.setCurrentText(str(vod_mode))
             silence = gui.get("silence")
             if silence is not None:
                 try: self.silence_spin.setValue(float(silence))
@@ -1119,6 +1130,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 傳遞 VAD 相關參數（永遠顯式傳遞，避免預設值不明）
         args += ["--vad_level", self.vad_level_combo.currentText()]
         args += ["--silence", f"{self.silence_spin.value():.2f}"]
+        if self.vod_mode_combo.currentText() == "Auto":
+            args += ["--auto-vod"]
         # 啟動 mWhisperSub（在 Windows 上讓它進入新的 process group，之後可用 CTRL_BREAK_EVENT 做優雅關閉）
         popen_kwargs = {"cwd": ROOT_DIR}
         if os.name == "nt":
