@@ -42,7 +42,8 @@ from overlay import Settings, SubtitleOverlay, Tray
 from srt_utils import LiveSRTWatcher
 ROOT_DIR = Path(__file__).resolve().parent
 ENGINE_PY = ROOT_DIR / "mWhisperSub.py"
-OVERLAY_PY = ROOT_DIR / "srt_overlay_tool.py"
+# Path to the overlay module
+OVERLAY_PY = ROOT_DIR / "overlay.py"
 
 # Systran faster-whisper 對應表（UI 簡名 -> HF Repo ID）
 MODEL_REPO_MAP = {
@@ -385,27 +386,17 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # GUI 欄位變更也要 autosave
         self.hotwords_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.srt_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
-<<<<<<< HEAD
         self.model_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
-=======
->>>>>>> codex/fix-whisper-not-stopping-transcription
         self.lang_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.console_chk.toggled.connect(lambda _=None: self.schedule_autosave(300))
         self.log_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.zh_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
-<<<<<<< HEAD
-        self.device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
-        self.audio_device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
-        self.vad_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
-        self.silence_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
-=======
         self.device_combo.currentIndexChanged.connect(self.device_changed)
         self.audio_device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.vad_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.silence_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.temp_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.suppress_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
->>>>>>> codex/fix-whisper-not-stopping-transcription
         # 主視窗移動/縮放 → autosave main_window_geometry
         self.installEventFilter(self)
         # 啟動時嘗試還原上次專案（使用全域 QSettings）
@@ -488,9 +479,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.srt_proj_name_edit.setText(d.name)
         # 嘗試載入專案（若 overlay 尚未建立，先還原 Settings；overlay 幾何會在 start 後再套用）
         self._load_project()
-<<<<<<< HEAD
-        # 若專案檔缺少路徑資訊，從資料夾內最新檔案補齊
-=======
         # 專案檔可能記錄了過期的 Hotwords/SRT 路徑；若檔案不存在或不在當前專案資料夾，清空後 fallback
         hot_p = Path(self.hotwords_edit.text().strip()) if self.hotwords_edit.text().strip() else None
         if not hot_p or not hot_p.exists() or hot_p.parent != d:
@@ -499,7 +487,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
         if not srt_p or not srt_p.exists() or srt_p.parent != d:
             self.srt_edit.clear()
         # 若專案檔缺少或失效路徑，從資料夾內最新檔案補齊
->>>>>>> codex/fix-whisper-not-stopping-transcription
         if not self.hotwords_edit.text().strip() or not self.srt_edit.text().strip():
             self._fallback_fill_paths_from_dir(d)
     # ---- Project persistence ----
@@ -543,11 +530,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 "srt_proj_name": self.srt_proj_name_edit.text().strip(),
                 "hotwords_path": self.hotwords_edit.text().strip(),
                 "srt_path": str(self.settings.srt_path) if getattr(self.settings, "srt_path", None) else "",
-<<<<<<< HEAD
-                "model": self.model_combo.currentText(),
-=======
                 "model": self.model_combo.currentData(),
->>>>>>> codex/fix-whisper-not-stopping-transcription
                 "lang": self.lang_combo.currentText(),
                 "console": bool(self.console_chk.isChecked()),
                 "log_level": self.log_level_combo.currentText(),
@@ -557,11 +540,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 "audio_device_index": self.audio_device_combo.currentIndex(),
                 "vad_level": self.vad_level_combo.currentText(),
                 "silence": float(self.silence_spin.value()),
-<<<<<<< HEAD
-=======
                 "temperature": float(self.temp_spin.value()),
-                "suppress_tokens": self.suppress_edit.text().strip(),          
->>>>>>> codex/fix-whisper-not-stopping-transcription
+                "suppress_tokens": self.suppress_edit.text().strip(),
             },
         }
         try:
@@ -600,11 +580,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 self.project_path_edit.setText(proj_path)
             model = gui.get("model")
             if model:
-<<<<<<< HEAD
-                self.model_combo.setCurrentText(model)
-=======
                 self._set_model_name(model)
->>>>>>> codex/fix-whisper-not-stopping-transcription
             lang = gui.get("lang")
             if lang:
                 self.lang_combo.setCurrentText(lang)
@@ -627,8 +603,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
             if silence is not None:
                 try: self.silence_spin.setValue(float(silence))
                 except Exception: pass
-<<<<<<< HEAD
-=======
             temperature = gui.get("temperature")
             if temperature is not None:
                 try: self.temp_spin.setValue(float(temperature))
@@ -636,7 +610,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
             suppress = gui.get("suppress_tokens")
             if suppress is not None:
                 self.suppress_edit.setText(str(suppress))
->>>>>>> codex/fix-whisper-not-stopping-transcription
             audio_text = gui.get("audio_device_text")
             audio_idx = gui.get("audio_device_index")
             if audio_text:
