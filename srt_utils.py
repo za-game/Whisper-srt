@@ -66,7 +66,12 @@ class LiveSRTWatcher(QtCore.QObject):
         if initial_emit:
             QtCore.QTimer.singleShot(0, self._emit_latest)
 
+        self._last_text = ""
+
     def _emit_latest(self):
         text = parse_srt_last_text(self.srt_path)
+        if text == self._last_text:
+            return
+        self._last_text = text
         self.updated.emit(text)
 

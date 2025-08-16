@@ -64,6 +64,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self.settings = settings
         self._drag_pos = None
         self.border_visible = False
+        self._current_text = ""
         self.setWindowFlags(
             QtCore.Qt.WindowStaysOnTopHint
             | QtCore.Qt.FramelessWindowHint
@@ -359,6 +360,9 @@ class SubtitleOverlay(QtWidgets.QLabel):
             )
             self.repaint()
             return
+        if text == self._current_text:
+            return
+        self._current_text = text
         if not text.strip():
             self.setText("")
             self._resize_keep_anchor(max(self.minimumWidth(), 600), self.minimumHeight())
@@ -387,6 +391,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
             self.show_entry_text(self.settings.preview_text)
             return
         if "overlay" != self.settings.strategy:
+            self._current_text = ""
             self.setText("")
             self._resize_keep_anchor(self.minimumWidth(), self.minimumHeight())
             self.repaint()
@@ -419,9 +424,9 @@ class Tray(QtWidgets.QSystemTrayIcon):
         fixed_act = strat_menu.addAction("設定 fixed 秒數…")
         fixed_act.triggered.connect(self._set_fixed)
         for name, label in (
-            ("cps", "cps（依字速顯示）"),
-            ("fixed", "fixed（固定秒數）"),
-            ("overlay", "overlay（常駐不自動清）"),
+            ("cps", "cps（單行字元×秒數）"),
+            ("fixed", "fixed（每行固定秒數）"),
+            ("overlay", "overlay（直到下行）"),
             ("none", "不顯示字幕（OBS 模式）"),
         ):
             act = strat_menu.addAction(label)
