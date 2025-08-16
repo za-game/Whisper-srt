@@ -109,6 +109,7 @@ parser.add_argument("--vad_gain", type=float, default=5.0,
 parser.add_argument("--noise_decay", type=float, default=0.98)
 parser.add_argument("--noise_decay_speech", type=float, default=0.999)
 parser.add_argument("--vad_level", type=int, default=1, choices=[0, 1, 2, 3])
+parser.add_argument("--auto-vad", action="store_true", help="啟用自動 VAD 模式")
 parser.add_argument("--debug_csv")
 parser.add_argument("--dbg_every", type=int, default=4)
 parser.add_argument("--log", type=int, default=0, help="0=INFO 1=詳細 2=DEBUG")
@@ -123,6 +124,7 @@ parser.add_argument("--zh", default="s2twp", choices=["none", "t2tw", "s2t", "s2
 parser.add_argument("--srt_path", default="live.srt",
                     help="輸出 SRT 檔案完整路徑，預設為 live.srt")
 args = parser.parse_args()
+AUTO_VAD = args.auto_vad
 
 # 若給的是簡名且不是目錄，映射成正式 Repo ID
 if ("/" not in args.model_dir) and (not os.path.isdir(args.model_dir)):
