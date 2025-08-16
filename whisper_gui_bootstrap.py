@@ -1183,6 +1183,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
             popen_kwargs["creationflags"] = creationflags
         # 非 Windows：不特別處理 console 視窗（由桌面環境決定），但仍會把 --log 傳給子程式（若有勾選）
         self.proc = subprocess.Popen([sys.executable, str(ENGINE_PY)] + args, **popen_kwargs)
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
 
         # 建立內嵌 Overlay 與系統匣；主窗最小化到系統匣
         if self.overlay is None:
