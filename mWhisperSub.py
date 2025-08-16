@@ -520,6 +520,19 @@ def consumer_worker():
 
             origin = audio_origin or 0.0
             for seg in segments:
+                no_speech = getattr(seg, "no_speech_prob", 0.0)
+                if (
+                    noise_floor is not None
+                    and seg_rms < noise_floor * 1.1
+                    and no_speech < 0.4
+                ):
+                    if args.log >= 1:
+                        log.info(
+                            "skip low-energy segment rms=%.4f no_speech_prob=%.2f",
+                            seg_rms,
+                            no_speech,
+                        )
+                    continue
                 words = [w for w in seg.words if w.probability >= conf_thr]
                 if not words:
                     continue

@@ -38,6 +38,7 @@ import sounddevice as sd
 import signal
 import threading
 import tqdm
+import numpy as np
 from overlay import Settings, SubtitleOverlay, Tray
 from srt_utils import LiveSRTWatcher
 ROOT_DIR = Path(__file__).resolve().parent
@@ -327,6 +328,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.silence_spin.setSingleStep(0.05)
         self.silence_spin.setValue(0.30)
         form_layout.addRow("靜音門檻 (秒)", self.silence_spin)
+
+        self.noise_btn = QtWidgets.QPushButton("偵測噪音等級")
+        self.noise_btn.clicked.connect(self.detect_noise_level)
+        form_layout.addRow(self.noise_btn)
 
         main_layout.addLayout(form_layout)
         self.status = QtWidgets.QPlainTextEdit()
@@ -761,6 +766,31 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.audio_device_combo.clear()
         for idx, label, sr in list_audio_devices():
             self.audio_device_combo.addItem(label, (idx, sr))
+
+    def detect_noise_level(self):
+        dev_data = self.audio_device_combo.currentData()
+        dev_id, sr = dev_data if dev_data is not None else (-1, 16000)
+        duration = 15
+        self.append_log("偵測噪音等級中…")
+        try:
+            audio = sd.rec(
+                int(duration * sr), samplerate=sr, channels=1, dtype="float32", device=dev_id
+            )
+            sd.wait()
+            rms = float(np.sqrt(np.mean(np.square(audio))))
+            noise_db = 20 * np.log10(rms + 1e-12)
+            if noise_db < -45:
+                level = 0
+            elif noise_db < -35:
+                level = 1
+            elif noise_db < -25:
+                level = 2
+            else:
+                level = 3
+            self.vad_level_combo.setCurrentIndex(level)
+            self.append_log(f"背景噪音 {noise_db:.1f} dB → 選擇 VAD {level}")
+        except Exception as e:
+            self.append_log(f"偵測失敗：{e}")
 
     def refresh_gpu_list(self):
         self.gpu_combo.clear()
