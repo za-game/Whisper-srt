@@ -19,14 +19,27 @@ import importlib.util
 from pathlib import Path
 from PyQt5 import QtCore, QtWidgets, QtGui
 from project_io import save_project, load_project
-import re
+
+# Register text cursor/block types for thread-safe queued connections
+_register_meta = getattr(QtCore, "qRegisterMetaType", None)
+if _register_meta is not None:  # PyQt5 with qRegisterMetaType
+    _register_meta(QtGui.QTextCursor)
+    _register_meta(QtGui.QTextBlock)
+else:  # Fallback for builds without qRegisterMetaType
+    try:
+        QtCore.QMetaType.registerType(QtGui.QTextCursor)
+        QtCore.QMetaType.registerType(QtGui.QTextBlock)
+    except Exception:
+        pass
+
 import os
 import urllib.request
 import sounddevice as sd
 import signal
-import math
 import threading
 import tqdm
+from overlay import Settings, SubtitleOverlay, Tray
+from srt_utils import LiveSRTWatcher
 ROOT_DIR = Path(__file__).resolve().parent
 ENGINE_PY = ROOT_DIR / "mWhisperSub.py"
 OVERLAY_PY = ROOT_DIR / "srt_overlay_tool.py"
@@ -39,542 +52,6 @@ MODEL_REPO_MAP = {
     "medium":   "Systran/faster-whisper-medium",
     "large-v2": "Systran/faster-whisper-large-v2",
 }
-
-# ──────────────────────── SRT 解析 / 監看 ────────────────────────
-def _tc_to_sec(tc: str) -> float:
-    h, m, s_ms = tc.split(":"); s, ms = s_ms.split(",")
-    return int(h)*3600 + int(m)*60 + int(s) + int(ms)/1000.0
-
-def parse_srt_last_text(path: Path) -> str:
-    """
-    以正則解析最後一段字幕的「文字」，避免 BOM/空白/非典型格式導致時間碼殘留。
-    """
-    try:
-        txt = path.read_text(encoding="utf-8", errors="replace")
-    except FileNotFoundError:
-        return ""
-    if not txt.strip():
-        return ""
-    # 移除可能出現在檔首或行首的 BOM，避免 .isdigit() / startswith 等判斷失效
-    txt = txt.replace("\ufeff", "")
-    # 以空白行分段
-    blocks = re.split(r"\n\s*\n", txt.strip())
-    if not blocks:
-        return ""
-    last = blocks[-1]
-    # 對齊 srt_overlay_tool.py：先抓時間碼行，再取其後所有行為正文
-    tc_pat = re.compile(r"^\s*(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3}).*$")
-    lines = [l.rstrip("\r") for l in last.splitlines() if l.strip()]
-    if not lines:
-        return ""
-    # 第一行可能是編號；若是數字就略過
-    if lines and lines[0].lstrip().isdigit():
-        lines = lines[1:]
-    if not lines:
-        return ""
-    # 若第一行是時間碼（後面可能帶 position/align 參數），就略過該行
-    if tc_pat.match(lines[0]):
-        lines = lines[1:]
-    return "\n".join(lines).strip()
-
-class LiveSRTWatcher(QtCore.QObject):
-    updated = QtCore.pyqtSignal(str)  # text
-    def __init__(self, srt_path: Path, parent=None):
-        super().__init__(parent)
-        self.srt_path = Path(srt_path).resolve()
-        # 確保存在，避免 QFileSystemWatcher 不觸發或第一次讀到半成品
-        if not self.srt_path.exists():
-            try: self.srt_path.touch(exist_ok=True)
-            except Exception: pass
-        self._watcher = QtCore.QFileSystemWatcher(self)
-
-         # 監看「檔案本身」+「其父資料夾」，避免 replace / 重新命名時漏事件（Windows 常見）
-        self._watcher.addPath(str(self.srt_path))
-        try:
-            self._watcher.addPath(str(self.srt_path.parent))
-        except Exception:
-            pass
-
-        self._deb_timer = QtCore.QTimer(self)
-        self._deb_timer.setSingleShot(True)
-        self._deb_timer.setInterval(80)  # debounce
-        self._deb_timer.timeout.connect(self._emit_latest)
-        self._watcher.fileChanged.connect(lambda _: self._deb_timer.start())
-        self._watcher.directoryChanged.connect(lambda _: self._deb_timer.start())
-        # 初次嘗試讀一次
-        QtCore.QTimer.singleShot(0, self._emit_latest)
-    def _emit_latest(self):
-        text = parse_srt_last_text(self.srt_path)
-        self.updated.emit(text)
-
-# ──────────────────────── 內嵌 Overlay / Settings ────────────────────────
-class Settings(QtCore.QObject):
-    changed = QtCore.pyqtSignal()
-    _qs = QtCore.QSettings("MyCompany", "SRTOverlay")
-    def __init__(self):
-        super().__init__()
-        self.strategy = self._qs.value("strategy", "overlay")  # "cps" | "fixed" | "overlay"
-        self.cps      = float(self._qs.value("cps", 15))
-        self.fixed    = float(self._qs.value("fixed", 2))
-        self.font     = self._qs.value("font", QtGui.QFont("Arial", 32), type=QtGui.QFont)
-        self.color    = self._qs.value("color", QtGui.QColor("#FFFFFF"), type=QtGui.QColor)
-        self.align    = int(self._qs.value("align", int(QtCore.Qt.AlignCenter)))
-        self.srt_path = Path(self._qs.value("srt_path", str((ROOT_DIR / "live.srt").resolve())))
-        # 文字樣式（外框 / 陰影 / 預覽）
-        self.outline_enabled = bool(self._qs.value("outline_enabled", False, type=bool))
-        self.outline_width   = int(self._qs.value("outline_width", 2))
-        self.outline_color   = self._qs.value("outline_color", QtGui.QColor("#000000"), type=QtGui.QColor)
-        self.shadow_enabled  = bool(self._qs.value("shadow_enabled", False, type=bool))
-        self.shadow_alpha    = float(self._qs.value("shadow_alpha", 0.50))
-        self.shadow_color    = self._qs.value("shadow_color", QtGui.QColor(0,0,0,200), type=QtGui.QColor)
-        self.shadow_dist     = int(self._qs.value("shadow_dist", 3))   # 陰影距離（像素）
-        self.shadow_blur     = int(self._qs.value("shadow_blur", 6))   # 陰影模糊（半徑）
-        self.preview         = bool(self._qs.value("preview", False, type=bool))
-        self.preview_lock    = bool(self._qs.value("preview_lock", False, type=bool))
-        self.preview_text    = self._qs.value("preview_text", "觀測用預覽文字")
-        self.offset_x        = int(self._qs.value("offset_x", 0))
-        self.offset_y        = int(self._qs.value("offset_y", 0))
-    def update(self, **kw):
-        changed = False
-        for k, v in kw.items():
-            if hasattr(self, k) and getattr(self, k) != v:
-                setattr(self, k, v)
-                self._qs.setValue(k, v)
-                changed = True
-        if changed:
-            self.changed.emit()
-
-class SubtitleOverlay(QtWidgets.QLabel):
-    MIN_W, MIN_H = 220, 90
-    def __init__(self, settings: Settings):
-        super().__init__("")
-        self.settings = settings
-        self._drag_pos = None
-        self.border_visible = False
-        self.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint |
-                            QtCore.Qt.FramelessWindowHint |
-                            QtCore.Qt.Tool)
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
-        self.setWindowOpacity(0.995)
-        self.setMouseTracking(True)
-        # 重要：Alignment 用 Alignment 物件，避免 int 導致失效
-        self.setAlignment(QtCore.Qt.Alignment(self.settings.align) | QtCore.Qt.AlignVCenter)
-        self.setMinimumWidth(600)
-        self.setWordWrap(False)
-        self.setMinimumSize(self.MIN_W, self.MIN_H)
-        self.setMargin(10)
-        self.settings.changed.connect(self._apply_settings)
-        self._apply_settings()
-        # 計時清除（cps/fixed 模式用；overlay 模式不清）
-        self.display_timer = QtCore.QTimer(self); self.display_timer.setSingleShot(True)
-        self.display_timer.timeout.connect(self._clear_subtitle)
-        self.resize(self.minimumWidth(), self.minimumHeight())
-
-        # --- Serialization of overlay geometry and text style ---
-    def to_dict(self) -> dict:
-        g = self.geometry()
-        return {
-            "overlay": {
-                "x": g.x(), "y": g.y(), "w": g.width(), "h": g.height(),
-                "visible": self.isVisible(),
-            },
-            "text": {
-                "align": int(self.alignment()),
-                "offset_x": int(getattr(self.settings, "offset_x", 0)),
-                "offset_y": int(getattr(self.settings, "offset_y", 0)),
-                "font_family": self.settings.font.family() if hasattr(self.settings, "font") else "",
-                "font_point_size": self.settings.font.pointSize() if hasattr(self.settings, "font") else 20,
-                "color": self.settings.color.name() if isinstance(self.settings.color, QtGui.QColor) else str(self.settings.color),
-            },
-            "outline": {
-                "enabled": bool(getattr(self.settings, "outline_enabled", False)),
-                "color": self.settings.outline_color.name() if isinstance(self.settings.outline_color, QtGui.QColor) else str(self.settings.outline_color),
-                "width": int(getattr(self.settings, "outline_width", 2)),
-            },
-            "shadow": {
-                "enabled": bool(getattr(self.settings, "shadow_enabled", False)),
-                "color": self.settings.shadow_color.name() if isinstance(self.settings.shadow_color, QtGui.QColor) else str(self.settings.shadow_color),
-                "alpha": float(getattr(self.settings, "shadow_alpha", 0.5)),
-                "dist": int(getattr(self.settings, "shadow_dist", 3)),
-                "blur": int(getattr(self.settings, "shadow_blur", 6)),
-            },
-        }
-
-    def from_dict(self, d: dict):
-        d = d or {}
-        ov = d.get("overlay", {})
-        tx = d.get("text", {})
-        ol = d.get("outline", {})
-        sh = d.get("shadow", {})
-        # 幾何
-        try:
-            self.setGeometry(ov.get("x", self.x()), ov.get("y", self.y()),
-                             ov.get("w", max(50, ov.get("w", self.width()))),
-                             ov.get("h", max(30, ov.get("h", self.height()))))
-            if ov.get("visible", True):
-                self.show()
-        except Exception:
-            pass
-        # 對齊/偏移
-        try:
-            # 用 Alignment（可同時帶多旗標），避免還原後對齊失效
-            align_val = int(tx.get("align", int(self.alignment())))
-            self.setAlignment(QtCore.Qt.Alignment(align_val))
-            # 關鍵：把對齊同步進 settings，避免之後 _apply_settings() 用舊值覆蓋
-            if hasattr(self, "settings"):
-                self.settings.update(align=align_val)
-        except Exception:
-            pass
-        # 偏移寫回設定（由 Settings.update 持久化）
-        if hasattr(self, "settings"):
-            self.settings.update(
-                offset_x=int(tx.get("offset_x", getattr(self.settings, "offset_x", 0))),
-                offset_y=int(tx.get("offset_y", getattr(self.settings, "offset_y", 0))),
-            )
-        # 字體與顏色
-        try:
-            f = QtGui.QFont(self.settings.font)
-            f.setFamily(tx.get("font_family", f.family()))
-            f.setPointSize(int(tx.get("font_point_size", f.pointSize())))
-            self.settings.update(font=f)
-        except Exception:
-            pass
-        if tx.get("color"):
-            self.settings.update(color=QtGui.QColor(tx["color"]))
-        # 外框/陰影
-        self.settings.update(
-            outline_enabled=bool(ol.get("enabled", getattr(self.settings, "outline_enabled", False))),
-            outline_color=QtGui.QColor(ol.get("color", getattr(self.settings, "outline_color", QtGui.QColor("#000000")).name())),
-            outline_width=int(ol.get("width", getattr(self.settings, "outline_width", 2))),
-            shadow_enabled=bool(sh.get("enabled", getattr(self.settings, "shadow_enabled", False))),
-            shadow_color=QtGui.QColor(sh.get("color", getattr(self.settings, "shadow_color", QtGui.QColor(0,0,0,200)).name())),
-            shadow_alpha=float(sh.get("alpha", getattr(self.settings, "shadow_alpha", 0.5))),
-            shadow_dist=int(sh.get("dist", getattr(self.settings, "shadow_dist", 3))),
-            shadow_blur=int(sh.get("blur", getattr(self.settings, "shadow_blur", 6))),
-        )
-        self.update()
-
-
-    def _apply_settings(self):
-        self.setFont(self.settings.font)
-        self.color = self.settings.color
-        self.setAlignment(QtCore.Qt.Alignment(self.settings.align) | QtCore.Qt.AlignVCenter)
-        self.repaint()
-
-    # 拖曳移動
-    def mousePressEvent(self, ev: QtGui.QMouseEvent):
-        if ev.button() == QtCore.Qt.LeftButton:
-            self._drag_pos = ev.globalPos() - self.frameGeometry().topLeft()
-            self.setCursor(QtCore.Qt.SizeAllCursor); ev.accept()
-    def mouseMoveEvent(self, ev: QtGui.QMouseEvent):
-        if ev.buttons() & QtCore.Qt.LeftButton and self._drag_pos is not None:
-            self.move(ev.globalPos() - self._drag_pos); ev.accept()
-    def mouseReleaseEvent(self, ev: QtGui.QMouseEvent):
-        if ev.button() == QtCore.Qt.LeftButton:
-            self._drag_pos = None
-            self.setCursor(QtCore.Qt.ArrowCursor); ev.accept()
-    def enterEvent(self, _): self.border_visible = True; self.update()
-    def leaveEvent(self, _): self.border_visible = False; self.update()
-    def paintEvent(self, _ev):
-        p = QtGui.QPainter(self)
-        p.setRenderHints(QtGui.QPainter.Antialiasing | QtGui.QPainter.TextAntialiasing)
-        p.fillRect(self.rect(), QtGui.QColor(0, 0, 0, 1))
-        rect = self.rect().adjusted(5, 5, -5, -5)
-        text = self.text()
-        align = self.alignment()
-
-        # calculate bounding rect once for whole text
-        fm = QtGui.QFontMetrics(self.font())
-        br = fm.boundingRect(rect, int(align), text)
-        offx = getattr(self.settings, "offset_x", 0)
-        offy = getattr(self.settings, "offset_y", 0)
-        text_rect = br.translated(offx, offy)
-
-        # 陰影（距離 + 模糊取樣）
-        if self.settings.shadow_enabled and text:
-            base = QtGui.QColor(self.settings.shadow_color)
-            a = max(0.0, min(1.0, float(self.settings.shadow_alpha)))
-            dist = max(0, int(self.settings.shadow_dist))
-            blur = max(0, int(self.settings.shadow_blur))
-            dx, dy = dist, dist  # 右下角方向
-            if blur == 0:
-                sc = QtGui.QColor(base); sc.setAlphaF(a)
-                p.setPen(sc)
-                p.drawText(text_rect.translated(dx, dy), int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop), text)
-            else:
-                rings = blur
-                samples = 12
-                for r in range(0, rings + 1):
-                    falloff = (1.0 - (r / (rings + 1.0))) ** 2
-                    sc = QtGui.QColor(base)
-                    sc.setAlphaF(a * falloff)
-                    p.setPen(sc)
-                    if r == 0:
-                        p.drawText(text_rect.translated(dx, dy), int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop), text)
-                    else:
-                        for k in range(samples):
-                            ang = 2 * math.pi * (k / samples)
-                            ox = int(round(dx + r * math.cos(ang)))
-                            oy = int(round(dy + r * math.sin(ang)))
-                            p.drawText(text_rect.translated(ox, oy), int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop), text)
-        # 外框（多方向覆蓋達到粗細）
-        if self.settings.outline_enabled and text:
-            p.setPen(self.settings.outline_color)
-            w = max(1, int(self.settings.outline_width))
-            for dx in range(-w, w+1):
-                for dy in range(-w, w+1):
-                    if dx == 0 and dy == 0:
-                        continue
-                    p.drawText(text_rect.translated(dx, dy), int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop), text)
-        # 本體文字
-        p.setPen(self._effective_color())
-        p.drawText(text_rect, int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop), text)
-        if self.border_visible:
-            pen = QtGui.QPen(QtGui.QColor("#CCCCCC")); pen.setWidth(2); p.setPen(pen)
-            p.drawRoundedRect(self.rect().adjusted(1,1,-1,-1), 8, 8)
-    def _effective_color(self) -> QtGui.QColor:
-        """
-        預覽模式（strategy=none 且 preview=True）時，降低透明度顯示以利區分。
-        其他情況維持原色。
-        """
-        c = QtGui.QColor(self.color)
-        if self.settings.strategy == "none" and self.settings.preview and self.text():
-            c.setAlphaF(max(0.35, min(1.0, c.alphaF()*0.5)))
-        return c
-    def show_entry_text(self, text: str):
-        # 新增：策略為 none（OBS 模式）時，若未勾選預覽 → 永遠不顯示
-        if self.settings.strategy == "none" and not self.settings.preview:
-            self.setText(""); self.adjustSize()
-            self.resize(max(self.minimumWidth(), 600), self.minimumHeight())
-            self.repaint()
-            return
-        if not text.strip():
-            self.setText("")
-            self.adjustSize()
-            self.resize(max(self.minimumWidth(), 600), self.minimumHeight())
-            self.repaint()
-            return
-        self.setText(text); self.adjustSize()
-        PADDING = 40
-        self.resize(max(self.width() + PADDING, 600), max(self.height(), self.minimumHeight()))
-        self.repaint()
-        if self.settings.strategy not in ("overlay", "none"):
-            dur = self.settings.fixed if self.settings.strategy == "fixed" else max(len(text)/self.settings.cps, 0.5)
-            self.display_timer.start(int(dur*1000))
-    def _clear_subtitle(self):
-        if "overlay" != self.settings.strategy:
-            self.setText(""); self.adjustSize()
-            self.resize(self.minimumWidth(), self.minimumHeight()); self.repaint()
-
-class Tray(QtWidgets.QSystemTrayIcon):
-    def __init__(self, settings: Settings, overlay: SubtitleOverlay, parent=None, on_stop=None):
-        icon = QtGui.QIcon.fromTheme("dialog-information")
-        if icon.isNull():
-            icon = QtWidgets.QApplication.style().standardIcon(QtWidgets.QStyle.SP_FileIcon)
-        super().__init__(icon, parent)
-        self.settings, self.overlay, self.parent_window = settings, overlay, parent
-        self.on_stop = on_stop
-        self.setToolTip("SRT Overlay")
-        self._build_menu()
-        self.show()
-    def _build_menu(self):
-        self.menu = QtWidgets.QMenu()
-        menu = self.menu
-
-
-        # 顯示策略子選單（cps / fixed / overlay）
-        strat_menu = menu.addMenu("顯示策略")
-        strat_grp = QtWidgets.QActionGroup(strat_menu); strat_grp.setExclusive(True)
-        cps_act = strat_menu.addAction("設定 cps…")
-        cps_act.triggered.connect(self._set_cps)
-        fixed_act = strat_menu.addAction("設定 fixed 秒數…")
-        fixed_act.triggered.connect(self._set_fixed)
-        for name, label in (
-            ("cps", "cps（依字速顯示）"),
-            ("fixed", "fixed（固定秒數）"),
-            ("overlay", "overlay（常駐不自動清）"),
-            ("none", "不顯示字幕（OBS 模式）"),
-        ):
-            act = strat_menu.addAction(label)
-            act.setCheckable(True)
-            act.setChecked(self.settings.strategy == name)
-            act.triggered.connect(lambda _=False, n=name: self.settings.update(strategy=n))
-            strat_grp.addAction(act)
-        # 文字樣式
-        style_menu = menu.addMenu("文字樣式")
-        # 字體大小
-        font_size_act = style_menu.addAction("設定文字大小…")
-        font_size_act.triggered.connect(self._set_font_size)
-        # 外框
-        outline_toggle = style_menu.addAction("開啟文字外框")
-        outline_toggle.setCheckable(True); outline_toggle.setChecked(self.settings.outline_enabled)
-        outline_toggle.toggled.connect(lambda v: self.settings.update(outline_enabled=bool(v)))
-        outline_w_act = style_menu.addAction("文字外框粗細…")
-        outline_w_act.triggered.connect(self._set_outline_width)
-        outline_color_act = style_menu.addAction("文字外框顏色…")
-        outline_color_act.triggered.connect(self._pick_outline_color)
-        # 陰影
-        shadow_toggle = style_menu.addAction("開啟文字陰影")
-        shadow_toggle.setCheckable(True); shadow_toggle.setChecked(self.settings.shadow_enabled)
-        shadow_toggle.toggled.connect(lambda v: self.settings.update(shadow_enabled=bool(v)))
-        shadow_alpha_act = style_menu.addAction("文字陰影透明度…")
-        shadow_alpha_act.triggered.connect(self._set_shadow_alpha)
-        shadow_color_act = style_menu.addAction("文字陰影顏色…")
-        shadow_color_act.triggered.connect(self._pick_shadow_color)
-        shadow_dist_act = style_menu.addAction("文字陰影距離…")
-        shadow_dist_act.triggered.connect(self._set_shadow_dist)
-        shadow_blur_act = style_menu.addAction("文字陰影模糊…")
-        shadow_blur_act.triggered.connect(self._set_shadow_blur)
-        style_menu.addSeparator()
-        # 字型（主文字）
-        font_act = style_menu.addAction("字型設定…")
-        font_act.triggered.connect(self._pick_font)
-        color_act = style_menu.addAction("字型顏色…")
-        color_act.triggered.connect(self._pick_color)
-        style_menu.addSeparator()
-        # 預覽
-        preview_act = style_menu.addAction("顯示預覽字幕")
-        preview_act.setCheckable(True)
-        preview_act.setChecked(self.settings.preview)
-        # 勾選時立刻送出預覽文字；取消時清空
-        preview_act.toggled.connect(
-            lambda v: (
-                self.settings.update(preview=bool(v)),
-                self.overlay and self.overlay.show_entry_text(self.settings.preview_text if v else "")
-            )
-        )
-        set_preview_text_act = style_menu.addAction("設定預覽文字…")
-        set_preview_text_act.triggered.connect(self._set_preview_text)
-        # 顯示/主視窗
-        show_act = menu.addAction("顯示主視窗")
-        show_act.triggered.connect(lambda: (self.parent_window.showNormal(), self.parent_window.raise_(), self.parent_window.activateWindow()))
-        menu.addSeparator()
-        self.align_menu = menu.addMenu("字幕對齊")
-        align_menu = self.align_menu
-        self.align_grp = QtWidgets.QActionGroup(align_menu); self.align_grp.setExclusive(True)
-        grp = self.align_grp
-        for label, flag in [("靠左", QtCore.Qt.AlignLeft),
-                            ("置中", QtCore.Qt.AlignCenter),
-                            ("靠右", QtCore.Qt.AlignRight)]:
-            act = align_menu.addAction(label); act.setCheckable(True)
-            act.setChecked(self.settings.align == int(flag))
-            act.triggered.connect(lambda _=False, f=flag: self.settings.update(align=int(f)))
-            grp.addAction(act)
-        menu.addSeparator()
-        # 停止轉寫
-        stop_act = menu.addAction("停止轉寫")
-        if self.on_stop:
-            stop_act.triggered.connect(self.on_stop)
-        menu.addSeparator()
-        quit_act = menu.addAction("結束")
-        def _quit():
-            # 退出前也做一次優雅關閉
-            if hasattr(self.parent_window, "stop_clicked"):
-                self.parent_window.stop_clicked()
-            QtWidgets.qApp.quit()
-        quit_act.triggered.connect(_quit)
-        self.setContextMenu(menu)
-    
-    def _set_cps(self):
-        # 讓使用者輸入每秒字數（cps）
-        val, ok = QtWidgets.QInputDialog.getDouble(
-            self.parent_window,
-            "設定 CPS",
-            "每秒字數（建議 10~20）：",
-            value=float(self.settings.cps),
-            min=1.0,
-            max=120.0,
-            decimals=1,
-        )
-        if ok:
-            # 更新數值，並切換到 cps 策略
-            self.settings.update(cps=float(val), strategy="cps")
-
-    def _set_fixed(self):
-        # 讓使用者輸入固定顯示秒數
-        val, ok = QtWidgets.QInputDialog.getDouble(
-            self.parent_window,
-            "設定固定秒數",
-             "每段字幕顯示秒數（建議 1.0~5.0）：",
-            value=float(self.settings.fixed),
-            min=0.3,
-            max=30.0,
-            decimals=1,
-        )
-        if ok:
-            # 更新數值，並切換到 fixed 策略
-            self.settings.update(fixed=float(val), strategy="fixed")
-    def _pick_font(self):
-        font, ok = QtWidgets.QFontDialog.getFont(self.settings.font, self.parent_window)
-        if ok: self.settings.update(font=font)
-    def _pick_color(self):
-        col = QtWidgets.QColorDialog.getColor(self.settings.color, self.parent_window)
-        if col.isValid(): self.settings.update(color=col)
-# ───────── UI handlers for text style ─────────
-    def _set_font_size(self):
-        f = self.settings.font
-        sz = f.pointSizeF() if f.pointSizeF() > 0 else float(f.pixelSize() or 32)
-        val, ok = QtWidgets.QInputDialog.getDouble(
-            self.parent_window, "設定文字大小", "字體大小（pt）：",
-            value=float(sz), min=6.0, max=200.0, decimals=1,
-        )
-        if ok:
-            nf = QtGui.QFont(f)
-            nf.setPointSizeF(float(val))
-            self.settings.update(font=nf)
-
-    def _set_outline_width(self):
-        val, ok = QtWidgets.QInputDialog.getInt(
-            self.parent_window, "設定外框粗細", "外框像素（1–12）：",
-            value=int(max(1, self.settings.outline_width)), min=1, max=12,
-        )
-        if ok:
-            self.settings.update(outline_width=int(val))
-
-    def _pick_outline_color(self):
-        col = QtWidgets.QColorDialog.getColor(self.settings.outline_color, self.parent_window)
-        if col.isValid():
-            self.settings.update(outline_color=col)
-
-    def _set_shadow_alpha(self):
-        val, ok = QtWidgets.QInputDialog.getDouble(
-            self.parent_window, "設定陰影透明度", "透明度（0.0–1.0）：",
-            value=float(self.settings.shadow_alpha), min=0.0, max=1.0, decimals=2,
-        )
-        if ok:
-            self.settings.update(shadow_alpha=float(val))
-
-    def _pick_shadow_color(self):
-        col = QtWidgets.QColorDialog.getColor(self.settings.shadow_color, self.parent_window)
-        if col.isValid():
-            self.settings.update(shadow_color=col)
-    def _set_shadow_dist(self):
-        val, ok = QtWidgets.QInputDialog.getInt(
-            self.parent_window, "設定陰影距離", "像素（0–50）：",
-            value=int(self.settings.shadow_dist), min=0, max=50,
-        )
-        if ok:
-            self.settings.update(shadow_dist=int(val))
-
-    def _set_shadow_blur(self):
-        val, ok = QtWidgets.QInputDialog.getInt(
-            self.parent_window, "設定陰影模糊半徑", "像素（0–40）：",
-            value=int(self.settings.shadow_blur), min=0, max=40,
-        )
-        if ok:
-            self.settings.update(shadow_blur=int(val))
-    def _set_preview_text(self):
-        """設定 overlay 預覽文字，若預覽已開啟則立即顯示"""
-        val, ok = QtWidgets.QInputDialog.getText(
-            self.parent_window,
-            "設定預覽文字",
-            "內容：",
-            text=self.settings.preview_text,
-        )
-        if ok:
-            self.settings.update(preview_text=str(val))
-            if self.settings.preview and self.overlay:
-                self.overlay.show_entry_text(self.settings.preview_text)
 
 # ──────────── 錄音設備偵測 ────────────
 def list_audio_devices():
@@ -633,13 +110,29 @@ def torch_wheel_exists(cuda_tag):
 def is_installed(pkg):
     return importlib.util.find_spec(pkg) is not None
 
-def run_pip(args, log_fn=None):
+def run_pip(args, log_fn=None, cancel_flag=None):
     cmd = [sys.executable, "-m", "pip"] + args
     if log_fn:
         log_fn(f"執行: {' '.join(cmd)}")
-    subprocess.check_call(cmd)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            if log_fn:
+                log_fn(line.rstrip())
+            if cancel_flag and cancel_flag():
+                proc.terminate()
+                break
+        proc.wait()
+    finally:
+        if proc.stdout:
+            proc.stdout.close()
+    if cancel_flag and cancel_flag():
+        raise RuntimeError("使用者取消")
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
 
-def install_deps(cuda_tag, log_fn=None):
+def install_deps(cuda_tag, log_fn=None, cancel_flag=None):
     pkgs = []
     if cuda_tag.startswith("cu"):
         # 安裝 PyTorch GPU 版
@@ -647,12 +140,40 @@ def install_deps(cuda_tag, log_fn=None):
             "torch", "torchvision", "torchaudio",
             "--index-url", f"https://download.pytorch.org/whl/{cuda_tag}"
         ]
-        run_pip(["install", "--upgrade"] + pkgs, log_fn=log_fn)
+        run_pip(["install", "--upgrade"] + pkgs, log_fn=log_fn, cancel_flag=cancel_flag)
     else:
         # CPU 版 PyTorch
-        run_pip(["install", "--upgrade", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu"], log_fn=log_fn)
+        run_pip(
+            [
+                "install",
+                "--upgrade",
+                "torch",
+                "torchvision",
+                "torchaudio",
+                "--index-url",
+                "https://download.pytorch.org/whl/cpu",
+            ],
+            log_fn=log_fn,
+            cancel_flag=cancel_flag,
+        )
     # faster-whisper 與 PyQt5
-    run_pip(["install", "--upgrade", "faster-whisper", "PyQt5", "sounddevice", "webrtcvad-wheels", "scipy", "opencc-python-reimplemented", "srt", "tqdm", "huggingface_hub"], log_fn=log_fn)
+    run_pip(
+        [
+            "install",
+            "--upgrade",
+            "faster-whisper",
+            "PyQt5",
+            "sounddevice",
+            "webrtcvad-wheels",
+            "scipy",
+            "opencc-python-reimplemented",
+            "srt",
+            "tqdm",
+            "huggingface_hub",
+        ],
+        log_fn=log_fn,
+        cancel_flag=cancel_flag,
+    )
 
 # ──────────── GUI ────────────
 class BootstrapWin(QtWidgets.QMainWindow):
@@ -660,7 +181,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("Whisper Caption – 安裝與啟動器")
         self.resize(600, 300)
-        layout = QtWidgets.QVBoxLayout()
+        main_layout = QtWidgets.QVBoxLayout()
 
         # 內嵌的設定 / overlay / 系統匣
         self.settings = Settings()
@@ -674,8 +195,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         # 模型選擇
         self.model_combo = QtWidgets.QComboBox()
-        self.model_combo.addItems(["tiny", "base", "small", "medium", "large-v2"])
+        for m in ["tiny", "base", "small", "medium", "large-v2"]:
+            self.model_combo.addItem(m, m)
         form_layout.addRow("模型", self.model_combo)
+        self.model_combo.currentIndexChanged.connect(self._on_model_changed)
 
         # 語言選擇
         self.lang_combo = QtWidgets.QComboBox()
@@ -704,9 +227,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         form_layout.addRow("中文轉換 (OpenCC)", self.zh_combo)
         # ───────── 專案（在 Hotword / SRT 之上）─────────
         proj_layout = QtWidgets.QHBoxLayout()
-        self.project_name_edit = QtWidgets.QLineEdit()
-        self.project_name_edit.setPlaceholderText("未選擇專案名稱")
-        self.project_name_edit.setReadOnly(True)
+        self.project_name_edit = QtWidgets.QLabel("未選擇專案")
         self.project_path_edit = QtWidgets.QLineEdit()
         self.project_path_edit.setPlaceholderText("未選擇專案路徑")
         self.project_path_edit.setReadOnly(True)
@@ -757,6 +278,14 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.device_combo = QtWidgets.QComboBox()
         self.device_combo.addItems(["cuda", "cpu"])
         form_layout.addRow("裝置", self.device_combo)
+        self._update_cuda_option(False)
+        # 記住上次裝置選擇（全域 QSettings）
+        self._qs = QtCore.QSettings("MyCompany", "WhisperCaption")
+        last_dev = self._qs.value("device", "cpu", type=str)
+        if last_dev == "cuda":
+            self.device_combo.setCurrentIndex(0)
+        else:
+            self.device_combo.setCurrentIndex(1)
 
         # 錄音設備選擇（展開前自動刷新）
         self.audio_device_combo = QtWidgets.QComboBox()
@@ -782,27 +311,69 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.silence_spin.setValue(0.30)
         form_layout.addRow("靜音門檻 (秒)", self.silence_spin)
 
-        layout.addLayout(form_layout)
+        # 溫度參數（Whisper temperature）
+        self.temp_spin = QtWidgets.QDoubleSpinBox()
+        self.temp_spin.setDecimals(2)
+        self.temp_spin.setRange(0.00, 1.00)
+        self.temp_spin.setSingleStep(0.05)
+        self.temp_spin.setValue(0.00)
+        form_layout.addRow("溫度", self.temp_spin)
+
+        # 抑制 Tokens（逗號分隔的 token ID）
+        self.suppress_edit = QtWidgets.QLineEdit()
+        self.suppress_edit.setPlaceholderText("-1")
+        self.suppress_edit.setText("-1")
+        form_layout.addRow("抑制 Tokens", self.suppress_edit)
+
+        main_layout.addLayout(form_layout)
         self.status = QtWidgets.QPlainTextEdit()
         self.status.setReadOnly(True)
         self.status.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
-        layout.addWidget(self.status)
-
-        self.install_btn = QtWidgets.QPushButton("檢查並安裝GPU套件/下載語言模型")
-        self.install_btn.clicked.connect(self.install_and_download_clicked)
-        layout.addWidget(self.install_btn)
+        main_layout.addWidget(self.status)
 
         self.start_btn = QtWidgets.QPushButton("開始轉寫")
         self.start_btn.clicked.connect(self.start_clicked)
-        layout.addWidget(self.start_btn)
+        main_layout.addWidget(self.start_btn)
 
         self.stop_btn = QtWidgets.QPushButton("停止轉寫")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self.stop_clicked)
-        layout.addWidget(self.stop_btn)
-        w = QtWidgets.QWidget()
-        w.setLayout(layout)
-        self.setCentralWidget(w)
+        main_layout.addWidget(self.stop_btn)
+
+        self.exit_btn = QtWidgets.QPushButton("結束")
+        self.exit_btn.clicked.connect(self.exit_clicked)
+        main_layout.addWidget(self.exit_btn)
+
+        main_tab = QtWidgets.QWidget()
+        main_tab.setLayout(main_layout)
+
+        env_layout = QtWidgets.QVBoxLayout()
+        self.pkg_label = QtWidgets.QLabel("torch/CUDA: 未檢測")
+        self.gpu_label = QtWidgets.QLabel("GPU: 未檢測")
+        self.driver_label = QtWidgets.QLabel("驅動版本: 未檢測")
+        env_layout.addWidget(self.pkg_label)
+        env_layout.addWidget(self.gpu_label)
+        env_layout.addWidget(self.driver_label)
+        self.detect_gpu_btn = QtWidgets.QPushButton("偵測GPU加速")
+        self.detect_gpu_btn.clicked.connect(self.check_env)
+        self.uninstall_torch_btn = QtWidgets.QPushButton("解除安裝torch/CUDA")
+        self.uninstall_torch_btn.clicked.connect(self.uninstall_torch_cuda)
+        self.install_torch_btn = QtWidgets.QPushButton("安裝torch/CUDA")
+        self.install_torch_btn.clicked.connect(self.install_torch_cuda)
+        env_layout.addWidget(self.detect_gpu_btn)
+        env_layout.addWidget(self.uninstall_torch_btn)
+        env_layout.addWidget(self.install_torch_btn)
+        env_layout.addStretch()
+        env_tab = QtWidgets.QWidget()
+        env_tab.setLayout(env_layout)
+
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.addTab(main_tab, "基本設定")
+        self.tabs.addTab(env_tab, "環境設定")
+        self.setCentralWidget(self.tabs)
+
+        self._last_model_index = self.model_combo.currentIndex()
+        self._refresh_model_items()
         QtCore.QTimer.singleShot(100, self.check_env)
         # project autosave
         self._autosave_timer = QtCore.QTimer(self)
@@ -814,15 +385,27 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # GUI 欄位變更也要 autosave
         self.hotwords_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.srt_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
+<<<<<<< HEAD
         self.model_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+=======
+>>>>>>> codex/fix-whisper-not-stopping-transcription
         self.lang_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.console_chk.toggled.connect(lambda _=None: self.schedule_autosave(300))
         self.log_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.zh_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+<<<<<<< HEAD
         self.device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.audio_device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.vad_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.silence_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
+=======
+        self.device_combo.currentIndexChanged.connect(self.device_changed)
+        self.audio_device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.vad_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.silence_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.temp_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.suppress_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
+>>>>>>> codex/fix-whisper-not-stopping-transcription
         # 主視窗移動/縮放 → autosave main_window_geometry
         self.installEventFilter(self)
         # 啟動時嘗試還原上次專案（使用全域 QSettings）
@@ -835,6 +418,59 @@ class BootstrapWin(QtWidgets.QMainWindow):
         except Exception:
             pass
         return d
+
+    def _model_downloaded(self, name: str) -> bool:
+        local_dir = ROOT_DIR / "models" / name
+        repo = MODEL_REPO_MAP.get(name, name)
+        hf_dir = ROOT_DIR / "hf_models" / repo.replace("/", "--")
+        if local_dir.exists() and any(local_dir.iterdir()):
+            return True
+        if hf_dir.exists() and any(hf_dir.iterdir()):
+            return True
+        return False
+
+    def _refresh_model_items(self):
+        model = self.model_combo.model()
+        for i in range(self.model_combo.count()):
+            base = self.model_combo.itemData(i)
+            available = self._model_downloaded(base)
+            text = base if available else f"{base} (未下載)"
+            self.model_combo.setItemText(i, text)
+            brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
+            model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
+
+    def _set_model_name(self, name: str):
+        for i in range(self.model_combo.count()):
+            if self.model_combo.itemData(i) == name:
+                self.model_combo.blockSignals(True)
+                self.model_combo.setCurrentIndex(i)
+                self.model_combo.blockSignals(False)
+                self._last_model_index = i
+                return
+
+    def _on_model_changed(self, idx: int):
+        base = self.model_combo.itemData(idx)
+        if not self._model_downloaded(base):
+            resp = QtWidgets.QMessageBox.question(
+                self,
+                "下載模型",
+                f"模型 {base} 未下載，現在下載嗎？",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            )
+            if resp == QtWidgets.QMessageBox.Yes:
+                repo = MODEL_REPO_MAP.get(base, base)
+                try:
+                    self._download_model_with_progress(repo)
+                except Exception as e:
+                    QtWidgets.QMessageBox.warning(self, "下載失敗", str(e))
+                self._refresh_model_items()
+            else:
+                self.model_combo.blockSignals(True)
+                self.model_combo.setCurrentIndex(self._last_model_index)
+                self.model_combo.blockSignals(False)
+                return
+        self._last_model_index = self.model_combo.currentIndex()
+        self.schedule_autosave(300)
     def closeEvent(self, ev: QtGui.QCloseEvent):
         ev.ignore()
         self.hide()
@@ -852,7 +488,18 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.srt_proj_name_edit.setText(d.name)
         # 嘗試載入專案（若 overlay 尚未建立，先還原 Settings；overlay 幾何會在 start 後再套用）
         self._load_project()
+<<<<<<< HEAD
         # 若專案檔缺少路徑資訊，從資料夾內最新檔案補齊
+=======
+        # 專案檔可能記錄了過期的 Hotwords/SRT 路徑；若檔案不存在或不在當前專案資料夾，清空後 fallback
+        hot_p = Path(self.hotwords_edit.text().strip()) if self.hotwords_edit.text().strip() else None
+        if not hot_p or not hot_p.exists() or hot_p.parent != d:
+            self.hotwords_edit.clear()
+        srt_p = Path(self.srt_edit.text().strip()) if self.srt_edit.text().strip() else None
+        if not srt_p or not srt_p.exists() or srt_p.parent != d:
+            self.srt_edit.clear()
+        # 若專案檔缺少或失效路徑，從資料夾內最新檔案補齊
+>>>>>>> codex/fix-whisper-not-stopping-transcription
         if not self.hotwords_edit.text().strip() or not self.srt_edit.text().strip():
             self._fallback_fill_paths_from_dir(d)
     # ---- Project persistence ----
@@ -896,7 +543,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 "srt_proj_name": self.srt_proj_name_edit.text().strip(),
                 "hotwords_path": self.hotwords_edit.text().strip(),
                 "srt_path": str(self.settings.srt_path) if getattr(self.settings, "srt_path", None) else "",
+<<<<<<< HEAD
                 "model": self.model_combo.currentText(),
+=======
+                "model": self.model_combo.currentData(),
+>>>>>>> codex/fix-whisper-not-stopping-transcription
                 "lang": self.lang_combo.currentText(),
                 "console": bool(self.console_chk.isChecked()),
                 "log_level": self.log_level_combo.currentText(),
@@ -906,6 +557,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 "audio_device_index": self.audio_device_combo.currentIndex(),
                 "vad_level": self.vad_level_combo.currentText(),
                 "silence": float(self.silence_spin.value()),
+<<<<<<< HEAD
+=======
+                "temperature": float(self.temp_spin.value()),
+                "suppress_tokens": self.suppress_edit.text().strip(),          
+>>>>>>> codex/fix-whisper-not-stopping-transcription
             },
         }
         try:
@@ -944,7 +600,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 self.project_path_edit.setText(proj_path)
             model = gui.get("model")
             if model:
+<<<<<<< HEAD
                 self.model_combo.setCurrentText(model)
+=======
+                self._set_model_name(model)
+>>>>>>> codex/fix-whisper-not-stopping-transcription
             lang = gui.get("lang")
             if lang:
                 self.lang_combo.setCurrentText(lang)
@@ -967,6 +627,16 @@ class BootstrapWin(QtWidgets.QMainWindow):
             if silence is not None:
                 try: self.silence_spin.setValue(float(silence))
                 except Exception: pass
+<<<<<<< HEAD
+=======
+            temperature = gui.get("temperature")
+            if temperature is not None:
+                try: self.temp_spin.setValue(float(temperature))
+                except Exception: pass
+            suppress = gui.get("suppress_tokens")
+            if suppress is not None:
+                self.suppress_edit.setText(str(suppress))
+>>>>>>> codex/fix-whisper-not-stopping-transcription
             audio_text = gui.get("audio_device_text")
             audio_idx = gui.get("audio_device_index")
             if audio_text:
@@ -1016,6 +686,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.status.appendPlainText(f"[Load] {p}")
         except Exception as e:
             self.status.appendPlainText(f"[Load] 失敗: {e}")
+        self._refresh_model_items()
 
     def schedule_autosave(self, delay_ms: int = 300):
         self._autosave_pending = True
@@ -1114,6 +785,30 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.audio_device_combo.clear()
         for idx, label, sr in list_audio_devices():
             self.audio_device_combo.addItem(label, (idx, sr))
+
+    def _update_cuda_option(self, ready: bool):
+        item = self.device_combo.model().item(0)
+        if ready:
+            item.setText("cuda")
+            item.setForeground(QtGui.QBrush())
+            self.cuda_ready = True
+        else:
+            item.setText("cuda (未就緒)")
+            item.setForeground(QtGui.QBrush(QtGui.QColor("gray")))
+            self.cuda_ready = False
+            if self.device_combo.currentIndex() == 0:
+                self.device_combo.setCurrentText("cpu")
+
+    def device_changed(self, _=None):
+        text = self.device_combo.currentText()
+        if text.startswith("cuda") and not getattr(self, "cuda_ready", False):
+            QtWidgets.QMessageBox.information(self, "提示", "請至環境設定檢查GPU加速")
+            self.device_combo.setCurrentText("cpu")
+            return
+        # 寫入 QSettings 以記住裝置
+        if hasattr(self, "_qs"):
+            self._qs.setValue("device", self.device_combo.currentText())
+        self.schedule_autosave(300)
     def create_project(self):
         # 1) 讓使用者輸入專案名稱
         proj_name, ok = QtWidgets.QInputDialog.getText(
@@ -1197,8 +892,14 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.settings._qs.setValue("last_project_dir", str(d))
         self.hot_proj_name_edit.setText(d.name)
         self.srt_proj_name_edit.setText(d.name)
-        # 先載入專案檔；若 GUI 路徑缺失，再 fallback 到資料夾內最新檔或預設
+        # 先載入專案檔；若其中記錄的路徑已失效或不在此資料夾，清空後再以資料夾最新檔補齊
         self._load_project()
+        hot_p = Path(self.hotwords_edit.text().strip()) if self.hotwords_edit.text().strip() else None
+        if not hot_p or not hot_p.exists() or hot_p.parent != d:
+            self.hotwords_edit.clear()
+        srt_p = Path(self.srt_edit.text().strip()) if self.srt_edit.text().strip() else None
+        if not srt_p or not srt_p.exists() or srt_p.parent != d:
+            self.srt_edit.clear()
         self._fallback_fill_paths_from_dir(d)
         if self.overlay:
             self.overlay.installEventFilter(self)
@@ -1207,47 +908,94 @@ class BootstrapWin(QtWidgets.QMainWindow):
     def check_env(self):
         gpu_name, driver_ver = detect_gpu()
         if gpu_name:
-                    cuda_tag = recommend_cuda_version(driver_ver)
-                    self.cuda_tag = cuda_tag
-                    self.append_log(f"偵測到 GPU: {gpu_name} | 驅動: {driver_ver} | 推薦 CUDA: {cuda_tag}")
+            cuda_tag = recommend_cuda_version(driver_ver)
+            self.cuda_tag = cuda_tag
+            self.gpu_label.setText(f"GPU: {gpu_name}")
+            self.driver_label.setText(f"驅動版本: {driver_ver}")
+            self.append_log(f"偵測到 GPU: {gpu_name} | 驅動: {driver_ver} | 推薦 CUDA: {cuda_tag}")
         else:
             self.cuda_tag = "cpu"
+            self.gpu_label.setText("GPU: 無")
+            self.driver_label.setText("驅動版本: 無")
             self.append_log("未偵測到 NVIDIA GPU，將使用 CPU 模式")
 
-        if is_installed("torch") and is_installed("faster_whisper"):
+        torch_ok = is_installed("torch") and is_installed("faster_whisper")
+        state = "已安裝" if torch_ok else "未安裝"
+        self.pkg_label.setText(f"torch/CUDA: {state} (推薦 {self.cuda_tag})")
+        self._update_cuda_option(torch_ok and self.cuda_tag != "cpu")
+        if torch_ok:
             self.append_log("環境已安裝，可直接啟動。")
         else:
             self.append_log("需要安裝相應套件。")
 
-    def install_clicked(self):
+    def _run_with_progress(self, title: str, task, label: str = "處理中…"):
+        dlg = QtWidgets.QProgressDialog(label, "取消", 0, 0, self)
+        dlg.setWindowTitle(title)
+        dlg.setWindowModality(QtCore.Qt.WindowModal)
+        dlg.setMinimumWidth(480)
+        bar = QtWidgets.QProgressBar(dlg)
+        bar.setRange(0, 0)
+        dlg.setBar(bar)
+        dlg.show()
+
+        cancelled = {"flag": False}
+        result = {"error": None}
+
+        def on_cancel():
+            cancelled["flag"] = True
+
+        dlg.canceled.connect(on_cancel)
+
+        def worker():
+            try:
+                task(lambda: cancelled["flag"])
+            except Exception as e:
+                result["error"] = str(e)
+            finally:
+                QtCore.QMetaObject.invokeMethod(dlg, "close", QtCore.Qt.QueuedConnection)
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        while t.is_alive():
+            QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 100)
+        if result["error"]:
+            raise RuntimeError(result["error"])
+        if cancelled["flag"]:
+            raise RuntimeError("使用者取消")
+
+    def uninstall_torch_cuda(self):
         try:
-            self.append_log("安裝中…請稍候")
-            QtWidgets.QApplication.processEvents()
-            install_deps(self.cuda_tag, log_fn=self.append_log)
-            self.append_log("安裝完成，可以啟動。")
+            self.append_log("解除安裝 torch/CUDA…")
+            self._run_with_progress(
+                "解除安裝 torch/CUDA",
+                lambda is_cancelled: run_pip(
+                    ["uninstall", "-y", "torch", "torchvision", "torchaudio"],
+                    log_fn=self.append_log,
+                    cancel_flag=is_cancelled,
+                ),
+                label="解除安裝中…",
+            )
+            self.append_log("解除安裝完成")
+        except Exception as e:
+            self.append_log(f"解除安裝失敗: {e}")
+        self.check_env()
+
+    def install_torch_cuda(self):
+        try:
+            self.append_log("安裝 torch/CUDA…")
+            self._run_with_progress(
+                "安裝 torch/CUDA",
+                lambda is_cancelled: install_deps(
+                    getattr(self, "cuda_tag", "cpu"),
+                    log_fn=self.append_log,
+                    cancel_flag=is_cancelled,
+                ),
+                label="安裝中…",
+            )
+            self.append_log("安裝完成")
         except Exception as e:
             self.append_log(f"安裝失敗: {e}")
-        # 一鍵：檢查並安裝 + 下載所選模型（含GUI進度）
-    def install_and_download_clicked(self):
-        # 1) 檢查並安裝 GPU/必要套件
-        try:
-            self.append_log("檢查環境與安裝套件…")
-            QtWidgets.QApplication.processEvents()
-            install_deps(getattr(self, "cuda_tag", "cpu"), log_fn=self.append_log)
-            self.append_log("套件就緒。")
-        except Exception as e:
-            self.append_log(f"安裝失敗: {e}")
-            return
-        # 2) 下載語言模型（依目前模型選擇）
-        model_name = self.model_combo.currentText().strip()
-        repo = MODEL_REPO_MAP.get(model_name, model_name)
-        self._last_repo = repo  # 記錄當前選擇，start 時可優先用本地下載資料夾
-        self.append_log(f"下載模型：{repo}（已存在快取則略過）")
-        try:
-            self._download_model_with_progress(repo)
-            self.append_log("模型檢查/下載完成。")
-        except Exception as e:
-            self.append_log(f"模型下載失敗：{e}")
+        self.check_env()
 
     def _download_model_with_progress(self, repo_id: str):
         """
@@ -1270,11 +1018,22 @@ class BootstrapWin(QtWidgets.QMainWindow):
         dlg.setAutoClose(False)
         dlg.setAutoReset(False)
         bar = QtWidgets.QProgressBar(dlg)
+        bar.setRange(0, 0)  # 未知進度時顯示忙碌動畫
         dlg.setBar(bar)
         dlg.show()
 
+        progress = {"target": 0}
+        timer = QtCore.QTimer(dlg)
+        timer.setInterval(100)
+
+        def animate():
+            bar.setValue(progress["target"])
+
+        timer.timeout.connect(animate)
+        timer.start()
+
         cancelled = {"flag": False}
-        result = {"error": None}  # None=成功, "cancelled"=使用者取消, 其他=錯誤訊息.Lock()
+        result = {"error": None}  # None=成功, "cancelled"=使用者取消, 其他=錯誤訊息
 
         class QtTqdm(tqdm.tqdm):
             """最簡做法：直接用 tqdm 的 desc 與 n/total → 以 0–100% 顯示目前這條下載列"""
@@ -1295,6 +1054,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
                         QtCore.Q_ARG(int, 100)
                     )
                     QtCore.QMetaObject.invokeMethod(
+                        bar, "setValue", QtCore.Qt.QueuedConnection,
+                        QtCore.Q_ARG(int, 0)
+                    )
+                    QtCore.QMetaObject.invokeMethod(
                         dlg, "setLabelText", QtCore.Qt.QueuedConnection,
                         QtCore.Q_ARG(str, f"{self.desc or '下載中'}: 0%")
                     )
@@ -1305,10 +1068,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 super().update(n)
                 if self._is_bytes and self.total:
                     pct = int(min(100, max(0, round(self.n * 100.0 / float(self.total)))))
-                    QtCore.QMetaObject.invokeMethod(
-                        bar, "setValue", QtCore.Qt.QueuedConnection,
-                        QtCore.Q_ARG(int, pct)
-                    )
+                    progress["target"] = pct
                     # 標題顯示「檔名: XX%」，對齊你終端機看到的樣式
                     label = f"{self.desc or '下載中'}: {pct}%"
                     QtCore.QMetaObject.invokeMethod(
@@ -1339,11 +1099,13 @@ class BootstrapWin(QtWidgets.QMainWindow):
             except Exception as e:
                 result["error"] = str(e)
             finally:
-                # 補滿進度，直接關閉對話框（不會觸發 canceled）
+                # 補滿進度並關閉對話框（不會觸發 canceled）
+                progress["target"] = 100
                 QtCore.QMetaObject.invokeMethod(
                     bar, "setValue", QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(int, bar.maximum())
+                    QtCore.Q_ARG(int, 100)
                 )
+                QtCore.QMetaObject.invokeMethod(timer, "stop", QtCore.Qt.QueuedConnection)
                 QtCore.QMetaObject.invokeMethod(dlg, "close", QtCore.Qt.QueuedConnection)
 
         def on_cancel():
@@ -1370,7 +1132,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 收集參數
         args = []
         # 模型：本地有就用路徑；沒有就用名稱交給 faster-whisper 下載
-        model_name = self.model_combo.currentText()
+        model_name = self.model_combo.currentData()
         # ① 先找你既有的 models/<name> 目錄
         local_model_dir = (ROOT_DIR / "models" / model_name)
         # ② 再找我們剛剛下載到的專案本地資料夾 hf_models/<Repo>
@@ -1421,6 +1183,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 傳遞 VAD 相關參數（永遠顯式傳遞，避免預設值不明）
         args += ["--vad_level", self.vad_level_combo.currentText()]
         args += ["--silence", f"{self.silence_spin.value():.2f}"]
+        args += ["--temperature", f"{self.temp_spin.value():.2f}"]
+        suppress = self.suppress_edit.text().strip()
+        if suppress:
+            args += ["--suppress_tokens", suppress]
         # 啟動 mWhisperSub（在 Windows 上讓它進入新的 process group，之後可用 CTRL_BREAK_EVENT 做優雅關閉）
         popen_kwargs = {"cwd": ROOT_DIR}
         if os.name == "nt":
@@ -1460,6 +1226,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 except Exception:
                     pass
                 self.srt_watcher = LiveSRTWatcher(srt_path, self)
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
         # ── Fallback：當專案檔沒記錄 hotwords/srt 時，從專案資料夾補上；再不行就維持預設 ──
     def _fallback_fill_paths_from_dir(self, d: Path):
         def _latest(glob_pat: str) -> Optional[Path]:
@@ -1511,11 +1279,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
             return True
         try:
             if os.name == "nt":
-                # 優雅：CTRL_BREAK_EVENT（只對 CREATE_NEW_PROCESS_GROUP 有效）
-               self.proc.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
+                self.proc.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
             else:
-                # 優雅：SIGINT
-                self.proc.send_signal(signal.SIGINT)
+                self.proc.terminate()
         except Exception:
             pass
         try:
@@ -1523,17 +1289,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
             return True
         except subprocess.TimeoutExpired:
             try:
-                # 次強：terminate
-                self.proc.terminate()
+                self.proc.kill()
                 self.proc.wait(timeout=2.0)
-                return True
             except Exception:
-                try:
-                    # 最後手段：kill
-                    self.proc.kill()
-                    self.proc.wait(timeout=2.0)
-                except Exception:
-                    pass
+                pass
         return self.proc.poll() is not None
 
     def stop_clicked(self):
@@ -1549,6 +1308,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 清一下 overlay 畫面（保留視窗，避免第二次設定要再叫出）
         if self.overlay:
             self.overlay.show_entry_text("")
+
+    def exit_clicked(self):
+        if self.proc:
+            self.stop_clicked()
+        QtWidgets.QApplication.quit()
     @QtCore.pyqtSlot(str)
     def append_log(self, text: str):
         """可被跨執行緒透過 invokeMethod 呼叫的安全 log 方法"""
