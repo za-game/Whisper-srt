@@ -31,6 +31,7 @@ from pathlib import Path
 from difflib import SequenceMatcher
 from typing import Deque, List, Tuple
 import re
+import zlib
 
 import numpy as np
 import scipy.signal as ss
@@ -99,6 +100,16 @@ parser.add_argument("--conf-base", type=float, default=0.4,
                     help="baseline word confidence threshold")
 parser.add_argument("--conf-max", type=float, default=0.8,
                     help="maximum word confidence threshold")
+parser.add_argument("--logprob-thr", type=float, default=-1.0,
+                    help="minimum avg logprob to keep segment; -1 disables")
+parser.add_argument("--compression-ratio-thr", type=float, default=2.4,
+                    help="maximum compression ratio before filtering")
+parser.add_argument("--temperature", default="0",
+                    help="comma-separated temperatures for fallback decoding")
+parser.add_argument("--freq-list",
+                    help="optional word frequency list for filtering")
+parser.add_argument("--max-unk", type=float, default=1.0,
+                    help="max allowed ratio of unknown words (0-1)")
 parser.add_argument("--input_file")
 parser.add_argument("--output")
 
@@ -125,6 +136,14 @@ parser.add_argument("--srt_path", default="live.srt",
                     help="輸出 SRT 檔案完整路徑，預設為 live.srt")
 args = parser.parse_args()
 AUTO_VAD = args.auto_vad
+TEMPERATURES = [float(t) for t in args.temperature.split(",") if t.strip()]
+freq_words: set[str] = set()
+if args.freq_list:
+    try:
+        with open(args.freq_list, "r", encoding="utf-8") as f:
+            freq_words = {ln.strip() for ln in f if ln.strip()}
+    except Exception as e:
+        print(f"[詞頻] 無法讀取 {args.freq_list}: {e}")
 
 # 若給的是簡名且不是目錄，映射成正式 Repo ID
 if ("/" not in args.model_dir) and (not os.path.isdir(args.model_dir)):
@@ -201,6 +220,13 @@ def is_prompt_echo(text: str, hotwords: List[str]) -> bool:
             pos = idx + 1
     ratio_cov = sum(mask) / len(s) if s else 0
     return ((ratio_tok >= 0.8) or (ratio_cov >= 0.8)) and (not punct or len(s) <= 12)
+
+
+def compression_ratio(text: str) -> float:
+    data = text.encode("utf-8")
+    if not data:
+        return 0.0
+    return len(data) / len(zlib.compress(data))
 
 # ─────────────────────────────────────────────────────────────
 # 6. Model loading & Chinese normalization
@@ -512,11 +538,20 @@ def consumer_worker():
                     use_prompt = " ".join(_hotwords)
 
             with model_lock:
-                segments, _ = model.transcribe(
-                    pcm_f, language=args.lang, beam_size=args.beam, best_of=args.best_of,
-                    condition_on_previous_text=False, word_timestamps=True,
-                    initial_prompt=use_prompt,
-                )
+                segments = []
+                for temp in TEMPERATURES:
+                    segments, _ = model.transcribe(
+                        pcm_f,
+                        language=args.lang,
+                        beam_size=args.beam,
+                        best_of=args.best_of,
+                        condition_on_previous_text=False,
+                        word_timestamps=True,
+                        initial_prompt=use_prompt,
+                        temperature=temp,
+                    )
+                    if segments:
+                        break
 
             origin = audio_origin or 0.0
             for seg in segments:
@@ -533,13 +568,27 @@ def consumer_worker():
                             no_speech,
                         )
                     continue
+                avg_log = getattr(seg, "avg_logprob", 0.0)
+                if args.logprob_thr > -1.0 and avg_log < args.logprob_thr:
+                    continue
                 words = [w for w in seg.words if w.probability >= conf_thr]
                 if not words:
                     continue
                 for st, et, raw_txt in split_segment(words, args.min_chars, args.max_chars):
+                    if (
+                        args.compression_ratio_thr > 0
+                        and compression_ratio(raw_txt) > args.compression_ratio_thr
+                    ):
+                        continue
                     txt = zh_norm(raw_txt.strip())
                     if is_style_echo(txt) or is_prompt_echo(txt, _hotwords):
                         continue
+                    if freq_words:
+                        toks = re.findall(r"\w+", txt)
+                        if toks:
+                            unk = sum(1 for t in toks if t not in freq_words) / len(toks)
+                            if unk > args.max_unk:
+                                continue
                     start = (end_ts - seg_len + st) - origin
                     end = (end_ts - seg_len + et) - origin
                     rec = {"start": max(0.0, start), "end": end, "text": txt, "reason": reason}

@@ -329,6 +329,20 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.silence_spin.setValue(0.30)
         form_layout.addRow("靜音門檻 (秒)", self.silence_spin)
 
+        # 溫度 / 幻覺過濾參數
+        self.temp_edit = QtWidgets.QLineEdit("0")
+        form_layout.addRow("溫度", self.temp_edit)
+        self.logprob_spin = QtWidgets.QDoubleSpinBox()
+        self.logprob_spin.setRange(-5.0, 0.0)
+        self.logprob_spin.setSingleStep(0.1)
+        self.logprob_spin.setValue(-1.0)
+        form_layout.addRow("logprob 閾值", self.logprob_spin)
+        self.comp_ratio_spin = QtWidgets.QDoubleSpinBox()
+        self.comp_ratio_spin.setRange(0.0, 10.0)
+        self.comp_ratio_spin.setSingleStep(0.1)
+        self.comp_ratio_spin.setValue(2.4)
+        form_layout.addRow("壓縮比閾值", self.comp_ratio_spin)
+
         self.noise_btn = QtWidgets.QPushButton("偵測噪音等級")
         self.noise_btn.clicked.connect(self.detect_noise_level)
         form_layout.addRow(self.noise_btn)
@@ -1200,6 +1214,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
         args += ["--silence", f"{self.silence_spin.value():.2f}"]
         if self.vad_mode_combo.currentText() == "Auto":
             args += ["--auto-vad"]
+        args += ["--logprob-thr", f"{self.logprob_spin.value():.2f}"]
+        args += ["--compression-ratio-thr", f"{self.comp_ratio_spin.value():.2f}"]
+        temp_str = self.temp_edit.text().strip()
+        if temp_str:
+            args += ["--temperature", temp_str]
         # 啟動 mWhisperSub（在 Windows 上讓它進入新的 process group，之後可用 CTRL_BREAK_EVENT 做優雅關閉）
         popen_kwargs = {"cwd": ROOT_DIR}
         if os.name == "nt":
