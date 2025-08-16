@@ -55,6 +55,11 @@ audio_t0: float | None = None     # ADC 時基
 audio_origin: float | None = None # 給 SRT 的零時標
 _punct_re = re.compile(r"[，。？！；、,.!?;:…]")
 
+conf_thr_base = 0.4
+conf_thr_max = 0.8
+conf_thr = conf_thr_base
+CONF_THR_STEP = 0.02
+
 # 3. ─────────────────────────── CLI ───────────────────────────
 parser = argparse.ArgumentParser(description="Realtime Whisper→SRT 轉寫器")
 # 允許簡名映射到 HuggingFace Repo
@@ -90,6 +95,10 @@ parser.add_argument("--best_of", type=int, default=1)
 parser.add_argument("--min_chars", type=int, default=9)
 parser.add_argument("--max_chars", type=int, default=16)
 parser.add_argument("--min_infer_gap", type=float, default=0.8)
+parser.add_argument("--conf-base", type=float, default=0.4,
+                    help="baseline word confidence threshold")
+parser.add_argument("--conf-max", type=float, default=0.8,
+                    help="maximum word confidence threshold")
 parser.add_argument("--input_file")
 parser.add_argument("--output")
 
@@ -124,6 +133,10 @@ if ("/" not in args.model_dir) and (not os.path.isdir(args.model_dir)):
 if args.list_devices:
     print(sd.query_devices())
     raise SystemExit
+
+conf_thr_base = args.conf_base
+conf_thr_max = args.conf_max
+conf_thr = conf_thr_base
 
 # ─────────────────────────────────────────────────────────────
 # 4. Logging & CSV debug
@@ -370,7 +383,7 @@ def rms_energy(pcm: np.ndarray) -> float:
 
 def trigger_worker():
     global last_vad_speech, last_trigger_ts, last_trigger_aud, last_state
-    global noise_floor, last_change_ts, seen_speech, audio_origin
+    global noise_floor, last_change_ts, seen_speech, audio_origin, conf_thr
 
     TAIL_KEEP_S = 0.2
     poll_s = 0.05
@@ -411,6 +424,10 @@ def trigger_worker():
             pcm_for_vad = ss.resample_poly(frame_f32, FS_VAD, FS_IN)
         is_vad = vad.is_speech((pcm_for_vad * 32768).astype(np.int16).tobytes(), FS_VAD)
         speech = bool(is_vad or (rms > thr))
+        if speech:
+            conf_thr = max(conf_thr_base, conf_thr - CONF_THR_STEP)
+        else:
+            conf_thr = min(conf_thr_max, conf_thr + CONF_THR_STEP)
 
         dyn_sil = max(args.silence, (np.median(pause_hist) * 0.6) if pause_hist else args.silence)
         if args.force_silence:
@@ -501,7 +518,10 @@ def consumer_worker():
 
             origin = audio_origin or 0.0
             for seg in segments:
-                for st, et, raw_txt in split_segment(seg.words, args.min_chars, args.max_chars):
+                words = [w for w in seg.words if w.probability >= conf_thr]
+                if not words:
+                    continue
+                for st, et, raw_txt in split_segment(words, args.min_chars, args.max_chars):
                     txt = zh_norm(raw_txt.strip())
                     if is_style_echo(txt) or is_prompt_echo(txt, _hotwords):
                         continue
