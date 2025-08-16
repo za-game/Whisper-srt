@@ -349,10 +349,14 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self.setGeometry(int(x), int(y), int(w), int(h))
 
     def show_entry_text(self, text: str):
-        # 新增：策略為 none（OBS 模式）時，若未勾選預覽 → 永遠不顯示
-        if self.settings.strategy == "none" and not self.settings.preview:
+        # 預覽優先：勾選預覽時永遠顯示預覽文字
+        if self.settings.preview:
+            text = self.settings.preview_text
+        elif self.settings.strategy == "none":
             self.setText("")
-            self._resize_keep_anchor(max(self.minimumWidth(), 600), self.minimumHeight())
+            self._resize_keep_anchor(
+                max(self.minimumWidth(), 600), self.minimumHeight()
+            )
             self.repaint()
             return
         if not text.strip():
@@ -372,6 +376,9 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self.repaint()
 
     def _clear_subtitle(self):
+        if self.settings.preview:
+            self.show_entry_text(self.settings.preview_text)
+            return
         if "overlay" != self.settings.strategy:
             self.setText("")
             self._resize_keep_anchor(self.minimumWidth(), self.minimumHeight())
@@ -513,6 +520,9 @@ class Tray(QtWidgets.QSystemTrayIcon):
             # 退出前也做一次優雅關閉
             if hasattr(self.parent_window, "stop_clicked"):
                 self.parent_window.stop_clicked()
+            self.hide()
+            if self.overlay:
+                self.overlay.close()
             QtWidgets.qApp.quit()
 
         quit_act.triggered.connect(_quit)
@@ -545,7 +555,9 @@ class Tray(QtWidgets.QSystemTrayIcon):
             self.settings.update(fixed=val)
 
     def _pick_font(self):
-        ok, font = QtWidgets.QFontDialog.getFont(self.settings.font, self.parent_window)
+        font, ok = QtWidgets.QFontDialog.getFont(
+            self.settings.font, self.parent_window
+        )
         if ok:
             self.settings.update(font=font)
 

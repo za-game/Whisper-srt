@@ -1289,6 +1289,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
     def exit_clicked(self):
         if self.proc:
             self.stop_clicked()
+        if getattr(self, "tray", None):
+            self.tray.hide()
+        if self.overlay:
+            self.overlay.close()
         QtWidgets.QApplication.quit()
     @QtCore.pyqtSlot(str)
     def append_log(self, text: str):
