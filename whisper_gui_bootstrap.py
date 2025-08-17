@@ -323,8 +323,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         # VAD 控制
         self.vad_combo = QtWidgets.QComboBox()
-        self.vad_combo.addItems(["Off", "0", "1", "2", "3", "Auto"])
+        self.vad_combo.addItems(["0", "1", "2", "3", "Auto"])
         self.vad_combo.setCurrentText("1")
+        self.vad_combo.setToolTip("VAD 等級：0 最寬鬆、3 最嚴格；Auto 會依噪音自動選擇")
         form_layout.addRow("VAD", self.vad_combo)
 
         # 靜音門檻秒數（mWhisperSub: --silence，預設 0.3）
@@ -333,20 +334,24 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.silence_spin.setRange(0.00, 5.00)
         self.silence_spin.setSingleStep(0.05)
         self.silence_spin.setValue(0.30)
+        self.silence_spin.setToolTip("兩句之間最少需要的靜音長度，調低可更快切句")
         form_layout.addRow("靜音門檻 (秒)", self.silence_spin)
 
         # 溫度 / 幻覺過濾參數
         self.temp_edit = QtWidgets.QLineEdit("0")
+        self.temp_edit.setToolTip("解碼溫度，可填入多個以逗號分隔；0 為最穩定")
         form_layout.addRow("溫度", self.temp_edit)
         self.logprob_spin = QtWidgets.QDoubleSpinBox()
         self.logprob_spin.setRange(-5.0, 0.0)
         self.logprob_spin.setSingleStep(0.1)
         self.logprob_spin.setValue(-1.0)
+        self.logprob_spin.setToolTip("平均 logprob 低於此值則丟棄；-1 表停用")
         form_layout.addRow("logprob 閾值", self.logprob_spin)
         self.comp_ratio_spin = QtWidgets.QDoubleSpinBox()
         self.comp_ratio_spin.setRange(0.0, 10.0)
         self.comp_ratio_spin.setSingleStep(0.1)
         self.comp_ratio_spin.setValue(2.4)
+        self.comp_ratio_spin.setToolTip("gzip 壓縮比超過此值視為重複幻覺；0 表停用")
         form_layout.addRow("壓縮比閾值", self.comp_ratio_spin)
 
         self.noise_btn = QtWidgets.QPushButton("偵測噪音等級")
@@ -627,7 +632,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             if isinstance(gpu_idx, int) and 0 <= gpu_idx < self.gpu_combo.count():
                 self.gpu_combo.setCurrentIndex(gpu_idx)
             vad = gui.get("vad")
-            if vad:
+            if vad and self.vad_combo.findText(str(vad)) >= 0:
                 self.vad_combo.setCurrentText(str(vad))
             silence = gui.get("silence")
             if silence is not None:
@@ -1216,10 +1221,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         # 傳遞 VAD 相關參數（永遠顯式傳遞，避免預設值不明）
         vad_opt = self.vad_combo.currentText()
-        if vad_opt not in ("Off", "Auto"):
-            args += ["--vad_level", vad_opt]
         if vad_opt == "Auto":
             args += ["--auto-vad"]
+        else:
+            args += ["--vad_level", vad_opt]
         args += ["--silence", f"{self.silence_spin.value():.2f}"]
         args += ["--logprob-thr", f"{self.logprob_spin.value():.2f}"]
         args += ["--compression-ratio-thr", f"{self.comp_ratio_spin.value():.2f}"]
