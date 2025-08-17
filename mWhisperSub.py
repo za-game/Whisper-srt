@@ -413,7 +413,7 @@ def trigger_worker():
     global last_vad_speech, last_trigger_ts, last_trigger_aud, last_state
     global noise_floor, last_change_ts, seen_speech, audio_origin, conf_thr
 
-    TAIL_KEEP_S = 0.2
+    TAIL_KEEP_S = 2.0  # keep 2 seconds before trigger for context
     poll_s = 0.05
     tick = 0
     dropped_infer = 0
