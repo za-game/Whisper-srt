@@ -329,6 +329,24 @@ class BootstrapWin(QtWidgets.QMainWindow):
         form_layout.addRow("VAD", self.vad_combo)
         form_layout.labelForField(self.vad_combo).setToolTip(self.vad_combo.toolTip())
 
+        # 音量門檻滑桿與即時音量條
+        self.mic_level_bar = QtWidgets.QProgressBar()
+        self.mic_level_bar.setRange(0, 100)
+        self.mic_level_bar.setTextVisible(False)
+        self.mic_level_bar.setFixedHeight(6)
+        self.mic_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.mic_slider.setRange(0, 100)
+        self.mic_slider.setValue(20)
+        self.mic_slider.setToolTip("自動 VAD 的音量門檻，低於此值視為靜音")
+        gate_widget = QtWidgets.QWidget()
+        gate_layout = QtWidgets.QVBoxLayout(gate_widget)
+        gate_layout.setContentsMargins(0, 0, 0, 0)
+        gate_layout.addWidget(self.mic_level_bar)
+        gate_layout.addWidget(self.mic_slider)
+        form_layout.addRow("音量門檻", gate_widget)
+        form_layout.labelForField(gate_widget).setToolTip(self.mic_slider.toolTip())
+        self.mic_slider.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
+
         # 靜音門檻秒數（mWhisperSub: --silence，預設 0.3）
         self.silence_spin = QtWidgets.QDoubleSpinBox()
         self.silence_spin.setDecimals(2)
@@ -418,6 +436,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self._autosave_timer.setSingleShot(True)
         self._autosave_timer.timeout.connect(self._do_autosave)
         self._autosave_pending = False
+        self._level_timer = QtCore.QTimer(self)
+        self._level_timer.timeout.connect(self._poll_mic_level)
+        self._level_timer.start(200)
         # 設定變更 → 觸發自動儲存（debounce）
         self.settings.changed.connect(lambda: self.schedule_autosave(300))
         # GUI 欄位變更也要 autosave
@@ -575,6 +596,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 "audio_device_text": self.audio_device_combo.currentText(),
                 "audio_device_index": self.audio_device_combo.currentIndex(),
                 "vad": self.vad_combo.currentText(),
+                "mic_gate": int(self.mic_slider.value()),
                 "silence": float(self.silence_spin.value()),
             },
         }
@@ -639,6 +661,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
             vad = gui.get("vad")
             if vad and self.vad_combo.findText(str(vad)) >= 0:
                 self.vad_combo.setCurrentText(str(vad))
+            mic_gate = gui.get("mic_gate")
+            if mic_gate is not None:
+                try:
+                    self.mic_slider.setValue(int(mic_gate))
+                except Exception:
+                    pass
             silence = gui.get("silence")
             if silence is not None:
                 try: self.silence_spin.setValue(float(silence))
@@ -818,6 +846,20 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.append_log(f"背景噪音 {noise_db:.1f} dB → 選擇 VAD {level}")
         except Exception as e:
             self.append_log(f"偵測失敗：{e}")
+
+    def _poll_mic_level(self):
+        if self.proc and self.proc.poll() is None:
+            return
+        dev_data = self.audio_device_combo.currentData()
+        dev_id, sr = dev_data if dev_data is not None else (-1, 16000)
+        try:
+            audio = sd.rec(int(0.05 * sr), samplerate=sr, channels=1, dtype="float32", device=dev_id)
+            sd.wait()
+            rms = float(np.sqrt(np.mean(np.square(audio))))
+            level = min(100, int(rms * 1000))
+            self.mic_level_bar.setValue(level)
+        except Exception:
+            pass
 
     def refresh_gpu_list(self):
         self.gpu_combo.clear()
@@ -1227,7 +1269,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 傳遞 VAD 相關參數（永遠顯式傳遞，避免預設值不明）
         vad_opt = self.vad_combo.currentText()
         if vad_opt == "Auto":
-            args += ["--auto-vad"]
+            args += ["--auto-vad", "--mic-thr", f"{self.mic_slider.value() / 100.0:.3f}"]
         else:
             args += ["--vad_level", vad_opt]
         args += ["--silence", f"{self.silence_spin.value():.2f}"]

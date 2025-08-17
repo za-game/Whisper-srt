@@ -121,6 +121,8 @@ parser.add_argument("--noise_decay", type=float, default=0.98)
 parser.add_argument("--noise_decay_speech", type=float, default=0.999)
 parser.add_argument("--vad_level", type=int, default=1, choices=[0, 1, 2, 3])
 parser.add_argument("--auto-vad", action="store_true", help="啟用自動 VAD 模式")
+parser.add_argument("--mic-thr", type=float, default=0.0,
+                    help="音量閾值，小於此值視為靜音 (0~1)")
 parser.add_argument("--debug_csv")
 parser.add_argument("--dbg_every", type=int, default=4)
 parser.add_argument("--log", type=int, default=0, help="0=INFO 1=詳細 2=DEBUG")
@@ -455,11 +457,12 @@ def trigger_worker():
             speech_peak = max(r for _, r in speech_hist)
 
         # 門檻 + VAD 判斷
+        thr = args.mic_thr or 0.0
         if args.auto_vad:
             dyn_range = max(0.0, speech_peak - (noise_floor or 0.0))
-            thr = (noise_floor or 0.0) + dyn_range * 0.2
+            thr = max(thr, (noise_floor or 0.0) + dyn_range * 0.2)
         else:
-            thr = (noise_floor or 0.0) * args.vad_gain
+            thr = max(thr, (noise_floor or 0.0) * args.vad_gain)
         pcm_for_vad = frame_f32
         if FS_IN != FS_VAD:
             pcm_for_vad = ss.resample_poly(frame_f32, FS_VAD, FS_IN)
