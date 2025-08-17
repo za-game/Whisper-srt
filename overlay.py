@@ -481,32 +481,38 @@ class TextStyleDialog(QtWidgets.QDialog):
         # Font controls
         self.font_combo = QtWidgets.QFontComboBox(self)
         self.font_combo.setCurrentFont(settings.font)
+        self.font_combo.setToolTip("選擇字幕字型")
         form.addRow("字型", self.font_combo)
 
         self.font_size = QtWidgets.QSpinBox(self)
         self.font_size.setRange(1, 200)
         self.font_size.setValue(settings.font.pointSize())
+        self.font_size.setToolTip("調整字體大小")
         form.addRow("字型大小", self.font_size)
 
         self.color_btn = QtWidgets.QPushButton(self)
         self._text_color = QtGui.QColor(settings.color)
         self._update_color_btn()
+        self.color_btn.setToolTip("選擇字幕顏色")
         self.color_btn.clicked.connect(self._pick_color)
         form.addRow("字型顏色", self.color_btn)
 
         # Outline controls
         self.outline_enabled = QtWidgets.QCheckBox(self)
         self.outline_enabled.setChecked(settings.outline_enabled)
+        self.outline_enabled.setToolTip("在字幕周圍加上外框以提升辨識度")
         form.addRow("開啟文字外框", self.outline_enabled)
 
         self.outline_width = QtWidgets.QSpinBox(self)
         self.outline_width.setRange(1, 20)
         self.outline_width.setValue(settings.outline_width)
+        self.outline_width.setToolTip("外框線寬，數值越大越粗")
         form.addRow("外框粗細", self.outline_width)
 
         self.outline_color_btn = QtWidgets.QPushButton(self)
         self._outline_color = QtGui.QColor(settings.outline_color)
         self._update_outline_btn()
+        self.outline_color_btn.setToolTip("外框顏色")
         self.outline_color_btn.clicked.connect(self._pick_outline_color)
         form.addRow("外框顏色", self.outline_color_btn)
 
@@ -518,6 +524,7 @@ class TextStyleDialog(QtWidgets.QDialog):
         # Shadow controls
         self.shadow_enabled = QtWidgets.QCheckBox(self)
         self.shadow_enabled.setChecked(settings.shadow_enabled)
+        self.shadow_enabled.setToolTip("為字幕文字加上陰影")
         form.addRow("開啟文字陰影", self.shadow_enabled)
 
         self.shadow_alpha = QtWidgets.QDoubleSpinBox(self)
@@ -525,16 +532,19 @@ class TextStyleDialog(QtWidgets.QDialog):
         self.shadow_alpha.setDecimals(2)
         self.shadow_alpha.setSingleStep(0.05)
         self.shadow_alpha.setValue(settings.shadow_alpha)
+        self.shadow_alpha.setToolTip("陰影透明度，0 為完全透明")
         form.addRow("陰影透明度", self.shadow_alpha)
 
         self.shadow_dist = QtWidgets.QSpinBox(self)
         self.shadow_dist.setRange(0, 50)
         self.shadow_dist.setValue(settings.shadow_dist)
+        self.shadow_dist.setToolTip("陰影與文字的位移距離")
         form.addRow("陰影距離", self.shadow_dist)
 
         self.shadow_blur = QtWidgets.QSpinBox(self)
         self.shadow_blur.setRange(0, 50)
         self.shadow_blur.setValue(settings.shadow_blur)
+        self.shadow_blur.setToolTip("陰影模糊半徑，值越大越模糊")
         form.addRow("陰影模糊", self.shadow_blur)
 
         self.shadow_enabled.toggled.connect(self._toggle_shadow_fields)
@@ -652,6 +662,7 @@ class Tray(QtWidgets.QSystemTrayIcon):
         # 文字樣式
         style_menu = menu.addMenu("文字樣式")
         style_act = style_menu.addAction("文字樣式設定…")
+        style_act.setToolTip("調整字型與文字效果")
         style_act.triggered.connect(self._open_text_style_dialog)
         style_menu.addSeparator()
         # 預覽
