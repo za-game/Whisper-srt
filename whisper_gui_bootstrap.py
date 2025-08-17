@@ -10,6 +10,19 @@ Whisper Live Caption – EXE 發佈專用啟動器
 4. 缺少時 GUI 詢問並安裝
 5. 完成後啟動 mWhisperSub.py，並在本程式內建字幕 Overlay + 系統匣設定
 """
+import sys, os
+def ensure_local_path():
+    base_dir = os.path.dirname(__file__)
+
+    # 判斷條件 1: sys.path 沒有當前目錄或 base_dir
+    has_local = ('' in sys.path) or (base_dir in sys.path)
+
+    # 判斷條件 2: 是否有 _pth 檔 (embedded 的特徵)
+    pth_exists = any(fname.endswith('._pth') for fname in os.listdir(os.path.dirname(sys.executable)))
+
+    if not has_local or pth_exists:
+        sys.path.insert(0, base_dir)
+ensure_local_path()
 from typing import Optional
 import subprocess
 import sys
