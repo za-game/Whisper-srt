@@ -327,6 +327,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.vad_combo.setCurrentText("1")
         self.vad_combo.setToolTip("VAD 等級：0 最寬鬆、3 最嚴格；Auto 會依噪音自動選擇")
         form_layout.addRow("VAD", self.vad_combo)
+        form_layout.labelForField(self.vad_combo).setToolTip(self.vad_combo.toolTip())
 
         # 靜音門檻秒數（mWhisperSub: --silence，預設 0.3）
         self.silence_spin = QtWidgets.QDoubleSpinBox()
@@ -336,23 +337,27 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.silence_spin.setValue(0.30)
         self.silence_spin.setToolTip("兩句之間最少需要的靜音長度，調低可更快切句")
         form_layout.addRow("靜音門檻 (秒)", self.silence_spin)
+        form_layout.labelForField(self.silence_spin).setToolTip(self.silence_spin.toolTip())
 
         # 溫度 / 幻覺過濾參數
         self.temp_edit = QtWidgets.QLineEdit("0")
         self.temp_edit.setToolTip("解碼溫度，可填入多個以逗號分隔；0 為最穩定")
         form_layout.addRow("溫度", self.temp_edit)
+        form_layout.labelForField(self.temp_edit).setToolTip(self.temp_edit.toolTip())
         self.logprob_spin = QtWidgets.QDoubleSpinBox()
         self.logprob_spin.setRange(-5.0, 0.0)
         self.logprob_spin.setSingleStep(0.1)
         self.logprob_spin.setValue(-1.0)
         self.logprob_spin.setToolTip("平均 logprob 低於此值則丟棄；-1 表停用")
         form_layout.addRow("logprob 閾值", self.logprob_spin)
+        form_layout.labelForField(self.logprob_spin).setToolTip(self.logprob_spin.toolTip())
         self.comp_ratio_spin = QtWidgets.QDoubleSpinBox()
         self.comp_ratio_spin.setRange(0.0, 10.0)
         self.comp_ratio_spin.setSingleStep(0.1)
         self.comp_ratio_spin.setValue(2.4)
         self.comp_ratio_spin.setToolTip("gzip 壓縮比超過此值視為重複幻覺；0 表停用")
         form_layout.addRow("壓縮比閾值", self.comp_ratio_spin)
+        form_layout.labelForField(self.comp_ratio_spin).setToolTip(self.comp_ratio_spin.toolTip())
 
         self.noise_btn = QtWidgets.QPushButton("偵測噪音等級")
         self.noise_btn.clicked.connect(self.detect_noise_level)
