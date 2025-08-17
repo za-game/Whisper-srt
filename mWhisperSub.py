@@ -386,6 +386,8 @@ last_vad_speech = 0.0; last_trigger_ts = 0.0; last_trigger_aud = 0.0
 noise_floor: float | None = None
 pause_hist: Deque[float] = deque(maxlen=30)
 last_state = False; last_change_ts = 0.0
+speech_hist: Deque[Tuple[float, float]] = deque()
+speech_peak = 0.0
 
 DEDUP_WIN = 3.0; SIM_THR = 0.85; MERGE_WIN = 1.0
 
@@ -412,6 +414,7 @@ def rms_energy(pcm: np.ndarray) -> float:
 def trigger_worker():
     global last_vad_speech, last_trigger_ts, last_trigger_aud, last_state
     global noise_floor, last_change_ts, seen_speech, audio_origin, conf_thr
+    global speech_peak
 
     TAIL_KEEP_S = 2.0  # keep 2 seconds before trigger for context
     poll_s = 0.05
@@ -436,7 +439,7 @@ def trigger_worker():
         frame = samples[-frame_len:]
         frame_f32 = frame.astype(np.float32) / 32768.0
 
-        # 動態雜訊估計
+        # 動態雜訊估計與語音峰值追蹤
         rms = rms_energy(frame)
         if noise_floor is None:
             noise_floor = rms
@@ -445,8 +448,18 @@ def trigger_worker():
             alpha_eff = decay ** dt
             noise_floor = alpha_eff * noise_floor + (1 - alpha_eff) * rms
 
+        speech_hist.append((mono, rms))
+        while speech_hist and mono - speech_hist[0][0] > 15.0:
+            speech_hist.popleft()
+        if speech_hist:
+            speech_peak = max(r for _, r in speech_hist)
+
         # 門檻 + VAD 判斷
-        thr = noise_floor * args.vad_gain
+        if args.auto_vad:
+            dyn_range = max(0.0, speech_peak - (noise_floor or 0.0))
+            thr = (noise_floor or 0.0) + dyn_range * 0.2
+        else:
+            thr = (noise_floor or 0.0) * args.vad_gain
         pcm_for_vad = frame_f32
         if FS_IN != FS_VAD:
             pcm_for_vad = ss.resample_poly(frame_f32, FS_VAD, FS_IN)
@@ -537,7 +550,11 @@ def consumer_worker():
 
             use_prompt = None
             if _hotwords:
-                dyn_thr = (noise_floor or 0.0) * max(1.5, args.vad_gain * 0.25)
+                if args.auto_vad:
+                    dyn_range = max(0.0, speech_peak - (noise_floor or 0.0))
+                    dyn_thr = (noise_floor or 0.0) + dyn_range * 0.2
+                else:
+                    dyn_thr = (noise_floor or 0.0) * max(1.5, args.vad_gain * 0.25)
                 if (seg_len >= 0.7 or reason == "VAD") and (seg_rms > dyn_thr):
                     use_prompt = " ".join(_hotwords)
 
