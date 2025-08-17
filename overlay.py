@@ -397,13 +397,110 @@ class SubtitleOverlay(QtWidgets.QLabel):
             self.repaint()
 
 
-class TextEffectsDialog(QtWidgets.QDialog):
+class TextStyleDialog(QtWidgets.QDialog):
+    class PreviewLabel(QtWidgets.QLabel):
+        def __init__(self, dlg: "TextStyleDialog"):
+            super().__init__(dlg.settings.preview_text, dlg)
+            self.dlg = dlg
+            self.setMinimumHeight(80)
+            self.setAlignment(QtCore.Qt.AlignCenter)
+
+        def paintEvent(self, event):
+            p = QtGui.QPainter(self)
+            p.setRenderHint(QtGui.QPainter.Antialiasing)
+            rect = self.rect()
+            f = self.dlg._current_font()
+            p.setFont(f)
+            text = self.text()
+            fm = QtGui.QFontMetrics(f)
+            text_rect = fm.boundingRect(text)
+            text_rect.moveTo(
+                (rect.width() - text_rect.width()) // 2,
+                (rect.height() - text_rect.height()) // 2,
+            )
+
+            if self.dlg.shadow_enabled.isChecked() and text:
+                base = QtGui.QColor(self.dlg.settings.shadow_color)
+                a = max(0.0, min(1.0, float(self.dlg.shadow_alpha.value())))
+                dist = max(0, int(self.dlg.shadow_dist.value()))
+                blur = max(0, int(self.dlg.shadow_blur.value()))
+                dx, dy = dist, dist
+                if blur == 0:
+                    sc = QtGui.QColor(base)
+                    sc.setAlphaF(a)
+                    p.setPen(sc)
+                    p.drawText(
+                        text_rect.translated(dx, dy),
+                        int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
+                        text,
+                    )
+                else:
+                    rings = blur
+                    samples = 12
+                    for r in range(0, rings + 1):
+                        falloff = (1.0 - (r / (rings + 1.0))) ** 2
+                        sc = QtGui.QColor(base)
+                        sc.setAlphaF(a * falloff)
+                        p.setPen(sc)
+                        if r == 0:
+                            p.drawText(
+                                text_rect.translated(dx, dy),
+                                int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
+                                text,
+                            )
+                        else:
+                            for k in range(samples):
+                                ang = 2 * math.pi * (k / samples)
+                                ox = int(round(dx + r * math.cos(ang)))
+                                oy = int(round(dy + r * math.sin(ang)))
+                                p.drawText(
+                                    text_rect.translated(ox, oy),
+                                    int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
+                                    text,
+                                )
+
+            if self.dlg.outline_enabled.isChecked() and text:
+                p.setPen(self.dlg._outline_color)
+                w = max(1, int(self.dlg.outline_width.value()))
+                for dx in range(-w, w + 1):
+                    for dy in range(-w, w + 1):
+                        if dx == 0 and dy == 0:
+                            continue
+                        p.drawText(
+                            text_rect.translated(dx, dy),
+                            int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
+                            text,
+                        )
+
+            p.setPen(self.dlg._text_color)
+            p.drawText(
+                text_rect,
+                int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
+                text,
+            )
+
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("文字效果設定")
+        self.setWindowTitle("文字樣式設定")
         self.settings = settings
 
         form = QtWidgets.QFormLayout(self)
+
+        # Font controls
+        self.font_combo = QtWidgets.QFontComboBox(self)
+        self.font_combo.setCurrentFont(settings.font)
+        form.addRow("字型", self.font_combo)
+
+        self.font_size = QtWidgets.QSpinBox(self)
+        self.font_size.setRange(1, 200)
+        self.font_size.setValue(settings.font.pointSize())
+        form.addRow("字型大小", self.font_size)
+
+        self.color_btn = QtWidgets.QPushButton(self)
+        self._text_color = QtGui.QColor(settings.color)
+        self._update_color_btn()
+        self.color_btn.clicked.connect(self._pick_color)
+        form.addRow("字型顏色", self.color_btn)
 
         # Outline controls
         self.outline_enabled = QtWidgets.QCheckBox(self)
@@ -422,6 +519,8 @@ class TextEffectsDialog(QtWidgets.QDialog):
         form.addRow("外框顏色", self.outline_color_btn)
 
         self.outline_enabled.toggled.connect(self._toggle_outline_fields)
+        self.outline_enabled.toggled.connect(self._update_preview)
+        self.outline_width.valueChanged.connect(self._update_preview)
         self._toggle_outline_fields(self.outline_enabled.isChecked())
 
         # Shadow controls
@@ -447,7 +546,15 @@ class TextEffectsDialog(QtWidgets.QDialog):
         form.addRow("陰影模糊", self.shadow_blur)
 
         self.shadow_enabled.toggled.connect(self._toggle_shadow_fields)
+        self.shadow_enabled.toggled.connect(self._update_preview)
+        self.shadow_alpha.valueChanged.connect(self._update_preview)
+        self.shadow_dist.valueChanged.connect(self._update_preview)
+        self.shadow_blur.valueChanged.connect(self._update_preview)
         self._toggle_shadow_fields(self.shadow_enabled.isChecked())
+
+        # Preview
+        self.preview = TextStyleDialog.PreviewLabel(self)
+        form.addRow("預覽", self.preview)
 
         # Buttons
         buttons = QtWidgets.QDialogButtonBox(
@@ -458,6 +565,30 @@ class TextEffectsDialog(QtWidgets.QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
+
+        # Other signals
+        self.font_combo.currentFontChanged.connect(lambda _: self._update_preview())
+        self.font_size.valueChanged.connect(self._update_preview)
+        self._update_preview()
+
+    def _current_font(self) -> QtGui.QFont:
+        f = QtGui.QFont(self.font_combo.currentFont())
+        f.setPointSize(self.font_size.value())
+        return f
+
+    def _update_color_btn(self):
+        col = self._text_color
+        self.color_btn.setText(col.name())
+        self.color_btn.setStyleSheet(
+            f"background-color: {col.name()}; color: {'#FFFFFF' if col.lightness() < 128 else '#000000'}"
+        )
+
+    def _pick_color(self):
+        col = QtWidgets.QColorDialog.getColor(self._text_color, self)
+        if col.isValid():
+            self._text_color = col
+            self._update_color_btn()
+            self._update_preview()
 
     def _update_outline_btn(self):
         col = self._outline_color
@@ -471,6 +602,7 @@ class TextEffectsDialog(QtWidgets.QDialog):
         if col.isValid():
             self._outline_color = col
             self._update_outline_btn()
+            self._update_preview()
 
     def _toggle_outline_fields(self, checked: bool):
         self.outline_width.setEnabled(checked)
@@ -480,6 +612,10 @@ class TextEffectsDialog(QtWidgets.QDialog):
         self.shadow_alpha.setEnabled(checked)
         self.shadow_dist.setEnabled(checked)
         self.shadow_blur.setEnabled(checked)
+
+    def _update_preview(self):
+        self.preview.setFont(self._current_font())
+        self.preview.update()
 
 class Tray(QtWidgets.QSystemTrayIcon):
     def __init__(self, settings: Settings, overlay: SubtitleOverlay, parent=None, on_stop=None):
@@ -523,18 +659,8 @@ class Tray(QtWidgets.QSystemTrayIcon):
 
         # 文字樣式
         style_menu = menu.addMenu("文字樣式")
-        # 字體大小
-        font_size_act = style_menu.addAction("設定文字大小…")
-        font_size_act.triggered.connect(self._set_font_size)
-        # 文字效果設定對話框
-        effects_act = style_menu.addAction("文字效果設定…")
-        effects_act.triggered.connect(self._open_text_effects_dialog)
-        style_menu.addSeparator()
-        # 字型（主文字）
-        font_act = style_menu.addAction("字型設定…")
-        font_act.triggered.connect(self._pick_font)
-        color_act = style_menu.addAction("字型顏色…")
-        color_act.triggered.connect(self._pick_color)
+        style_act = style_menu.addAction("文字樣式設定…")
+        style_act.triggered.connect(self._open_text_style_dialog)
         style_menu.addSeparator()
         # 預覽
         preview_act = style_menu.addAction("顯示預覽字幕")
@@ -627,35 +753,6 @@ class Tray(QtWidgets.QSystemTrayIcon):
         if ok:
             self.settings.update(fixed=val)
 
-    def _pick_font(self):
-        font, ok = QtWidgets.QFontDialog.getFont(
-            self.settings.font, self.parent_window
-        )
-        if ok:
-            self.settings.update(font=font)
-
-    def _pick_color(self):
-        col = QtWidgets.QColorDialog.getColor(
-            self.settings.color, self.parent_window
-        )
-        if col.isValid():
-            self.settings.update(color=col)
-
-    def _set_font_size(self):
-        val, ok = QtWidgets.QInputDialog.getInt(
-            self.parent_window,
-            "設定文字大小",
-            "字型大小",
-            self.settings.font.pointSize(),
-            1,
-            200,
-            1,
-        )
-        if ok:
-            f = QtGui.QFont(self.settings.font)
-            f.setPointSize(val)
-            self.settings.update(font=f)
-
     def _set_preview_text(self):
         text, ok = QtWidgets.QInputDialog.getText(
             self.parent_window,
@@ -669,10 +766,12 @@ class Tray(QtWidgets.QSystemTrayIcon):
             if self.settings.preview:
                 self.overlay and self.overlay.show_entry_text(text)
 
-    def _open_text_effects_dialog(self):
-        dlg = TextEffectsDialog(self.settings, self.parent_window)
+    def _open_text_style_dialog(self):
+        dlg = TextStyleDialog(self.settings, self.parent_window)
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
             self.settings.update(
+                font=dlg._current_font(),
+                color=dlg._text_color,
                 outline_enabled=dlg.outline_enabled.isChecked(),
                 outline_width=dlg.outline_width.value(),
                 outline_color=dlg._outline_color,
