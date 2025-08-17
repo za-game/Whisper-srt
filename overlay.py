@@ -397,6 +397,90 @@ class SubtitleOverlay(QtWidgets.QLabel):
             self.repaint()
 
 
+class TextEffectsDialog(QtWidgets.QDialog):
+    def __init__(self, settings: Settings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("文字效果設定")
+        self.settings = settings
+
+        form = QtWidgets.QFormLayout(self)
+
+        # Outline controls
+        self.outline_enabled = QtWidgets.QCheckBox(self)
+        self.outline_enabled.setChecked(settings.outline_enabled)
+        form.addRow("開啟文字外框", self.outline_enabled)
+
+        self.outline_width = QtWidgets.QSpinBox(self)
+        self.outline_width.setRange(1, 20)
+        self.outline_width.setValue(settings.outline_width)
+        form.addRow("外框粗細", self.outline_width)
+
+        self.outline_color_btn = QtWidgets.QPushButton(self)
+        self._outline_color = QtGui.QColor(settings.outline_color)
+        self._update_outline_btn()
+        self.outline_color_btn.clicked.connect(self._pick_outline_color)
+        form.addRow("外框顏色", self.outline_color_btn)
+
+        self.outline_enabled.toggled.connect(self._toggle_outline_fields)
+        self._toggle_outline_fields(self.outline_enabled.isChecked())
+
+        # Shadow controls
+        self.shadow_enabled = QtWidgets.QCheckBox(self)
+        self.shadow_enabled.setChecked(settings.shadow_enabled)
+        form.addRow("開啟文字陰影", self.shadow_enabled)
+
+        self.shadow_alpha = QtWidgets.QDoubleSpinBox(self)
+        self.shadow_alpha.setRange(0.0, 1.0)
+        self.shadow_alpha.setDecimals(2)
+        self.shadow_alpha.setSingleStep(0.05)
+        self.shadow_alpha.setValue(settings.shadow_alpha)
+        form.addRow("陰影透明度", self.shadow_alpha)
+
+        self.shadow_dist = QtWidgets.QSpinBox(self)
+        self.shadow_dist.setRange(0, 50)
+        self.shadow_dist.setValue(settings.shadow_dist)
+        form.addRow("陰影距離", self.shadow_dist)
+
+        self.shadow_blur = QtWidgets.QSpinBox(self)
+        self.shadow_blur.setRange(0, 50)
+        self.shadow_blur.setValue(settings.shadow_blur)
+        form.addRow("陰影模糊", self.shadow_blur)
+
+        self.shadow_enabled.toggled.connect(self._toggle_shadow_fields)
+        self._toggle_shadow_fields(self.shadow_enabled.isChecked())
+
+        # Buttons
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
+            QtCore.Qt.Horizontal,
+            self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def _update_outline_btn(self):
+        col = self._outline_color
+        self.outline_color_btn.setText(col.name())
+        self.outline_color_btn.setStyleSheet(
+            f"background-color: {col.name()}; color: {'#FFFFFF' if col.lightness() < 128 else '#000000'}"
+        )
+
+    def _pick_outline_color(self):
+        col = QtWidgets.QColorDialog.getColor(self._outline_color, self)
+        if col.isValid():
+            self._outline_color = col
+            self._update_outline_btn()
+
+    def _toggle_outline_fields(self, checked: bool):
+        self.outline_width.setEnabled(checked)
+        self.outline_color_btn.setEnabled(checked)
+
+    def _toggle_shadow_fields(self, checked: bool):
+        self.shadow_alpha.setEnabled(checked)
+        self.shadow_dist.setEnabled(checked)
+        self.shadow_blur.setEnabled(checked)
+
 class Tray(QtWidgets.QSystemTrayIcon):
     def __init__(self, settings: Settings, overlay: SubtitleOverlay, parent=None, on_stop=None):
         icon = QtGui.QIcon.fromTheme("dialog-information")
@@ -442,32 +526,9 @@ class Tray(QtWidgets.QSystemTrayIcon):
         # 字體大小
         font_size_act = style_menu.addAction("設定文字大小…")
         font_size_act.triggered.connect(self._set_font_size)
-        # 外框
-        outline_toggle = style_menu.addAction("開啟文字外框")
-        outline_toggle.setCheckable(True)
-        outline_toggle.setChecked(self.settings.outline_enabled)
-        outline_toggle.toggled.connect(
-            lambda v: self.settings.update(outline_enabled=bool(v))
-        )
-        outline_w_act = style_menu.addAction("文字外框粗細…")
-        outline_w_act.triggered.connect(self._set_outline_width)
-        outline_color_act = style_menu.addAction("文字外框顏色…")
-        outline_color_act.triggered.connect(self._pick_outline_color)
-        # 陰影
-        shadow_toggle = style_menu.addAction("開啟文字陰影")
-        shadow_toggle.setCheckable(True)
-        shadow_toggle.setChecked(self.settings.shadow_enabled)
-        shadow_toggle.toggled.connect(
-            lambda v: self.settings.update(shadow_enabled=bool(v))
-        )
-        shadow_alpha_act = style_menu.addAction("文字陰影透明度…")
-        shadow_alpha_act.triggered.connect(self._set_shadow_alpha)
-        shadow_color_act = style_menu.addAction("文字陰影顏色…")
-        shadow_color_act.triggered.connect(self._pick_shadow_color)
-        shadow_dist_act = style_menu.addAction("文字陰影距離…")
-        shadow_dist_act.triggered.connect(self._set_shadow_dist)
-        shadow_blur_act = style_menu.addAction("文字陰影模糊…")
-        shadow_blur_act.triggered.connect(self._set_shadow_blur)
+        # 文字效果設定對話框
+        effects_act = style_menu.addAction("文字效果設定…")
+        effects_act.triggered.connect(self._open_text_effects_dialog)
         style_menu.addSeparator()
         # 字型（主文字）
         font_act = style_menu.addAction("字型設定…")
@@ -595,72 +656,6 @@ class Tray(QtWidgets.QSystemTrayIcon):
             f.setPointSize(val)
             self.settings.update(font=f)
 
-    def _set_outline_width(self):
-        val, ok = QtWidgets.QInputDialog.getInt(
-            self.parent_window,
-            "設定外框粗細",
-            "粗細像素",
-            self.settings.outline_width,
-            1,
-            20,
-            1,
-        )
-        if ok:
-            self.settings.update(outline_width=val)
-
-    def _pick_outline_color(self):
-        col = QtWidgets.QColorDialog.getColor(
-            self.settings.outline_color, self.parent_window
-        )
-        if col.isValid():
-            self.settings.update(outline_color=col)
-
-    def _set_shadow_alpha(self):
-        val, ok = QtWidgets.QInputDialog.getDouble(
-            self.parent_window,
-            "設定陰影透明度",
-            "透明度 (0-1)",
-            self.settings.shadow_alpha,
-            0.0,
-            1.0,
-            2,
-        )
-        if ok:
-            self.settings.update(shadow_alpha=val)
-
-    def _pick_shadow_color(self):
-        col = QtWidgets.QColorDialog.getColor(
-            self.settings.shadow_color, self.parent_window
-        )
-        if col.isValid():
-            self.settings.update(shadow_color=col)
-
-    def _set_shadow_dist(self):
-        val, ok = QtWidgets.QInputDialog.getInt(
-            self.parent_window,
-            "設定陰影距離",
-            "距離像素",
-            self.settings.shadow_dist,
-            0,
-            50,
-            1,
-        )
-        if ok:
-            self.settings.update(shadow_dist=val)
-
-    def _set_shadow_blur(self):
-        val, ok = QtWidgets.QInputDialog.getInt(
-            self.parent_window,
-            "設定陰影模糊",
-            "模糊半徑",
-            self.settings.shadow_blur,
-            0,
-            50,
-            1,
-        )
-        if ok:
-            self.settings.update(shadow_blur=val)
-
     def _set_preview_text(self):
         text, ok = QtWidgets.QInputDialog.getText(
             self.parent_window,
@@ -673,3 +668,16 @@ class Tray(QtWidgets.QSystemTrayIcon):
             self.settings.update(preview_text=text)
             if self.settings.preview:
                 self.overlay and self.overlay.show_entry_text(text)
+
+    def _open_text_effects_dialog(self):
+        dlg = TextEffectsDialog(self.settings, self.parent_window)
+        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+            self.settings.update(
+                outline_enabled=dlg.outline_enabled.isChecked(),
+                outline_width=dlg.outline_width.value(),
+                outline_color=dlg._outline_color,
+                shadow_enabled=dlg.shadow_enabled.isChecked(),
+                shadow_alpha=dlg.shadow_alpha.value(),
+                shadow_dist=dlg.shadow_dist.value(),
+                shadow_blur=dlg.shadow_blur.value(),
+            )
