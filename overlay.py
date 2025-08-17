@@ -1,5 +1,4 @@
 from pathlib import Path
-import math
 
 from PyQt5 import QtCore, QtWidgets, QtGui
 
@@ -267,44 +266,41 @@ class SubtitleOverlay(QtWidgets.QLabel):
             a = max(0.0, min(1.0, float(self.settings.shadow_alpha)))
             dist = max(0, int(self.settings.shadow_dist))
             blur = max(0, int(self.settings.shadow_blur))
-            dx, dy = dist, dist  # 右下角方向
-            if blur == 0:
+            directions = [
+                (1, 0),
+                (-1, 0),
+                (0, 1),
+                (0, -1),
+                (1, 1),
+                (1, -1),
+                (-1, 1),
+                (-1, -1),
+            ]
+            # 中心陰影
+            sc = QtGui.QColor(base)
+            sc.setAlphaF(a)
+            p.setPen(sc)
+            p.drawText(
+                text_rect.translated(dist, dist),
+                int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
+                text,
+            )
+            for r in range(1, blur + 1):
+                fall = a * (1 - r / (blur + 1)) ** 2
                 sc = QtGui.QColor(base)
-                sc.setAlphaF(a)
-                p.setPen(sc)
-                p.drawText(
-                    text_rect.translated(dx, dy),
-                    int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
-                    text,
-                )
-            else:
-                rings = blur
-                samples = 12
-                for r in range(0, rings + 1):
-                    falloff = (1.0 - (r / (rings + 1.0))) ** 2
-                    sc = QtGui.QColor(base)
-                    sc.setAlphaF(a * falloff)
+                sc.setAlphaF(fall)
+                for ox, oy in directions:
                     p.setPen(sc)
-                    if r == 0:
-                        p.drawText(
-                            text_rect.translated(dx, dy),
-                            int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
-                            text,
-                        )
-                    else:
-                        for k in range(samples):
-                            ang = 2 * math.pi * (k / samples)
-                            ox = int(round(dx + r * math.cos(ang)))
-                            oy = int(round(dy + r * math.sin(ang)))
-                            p.drawText(
-                                text_rect.translated(ox, oy),
-                                int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
-                                text,
-                            )
+                    p.drawText(
+                        text_rect.translated(dist + ox * r, dist + oy * r),
+                        int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
+                        text,
+                    )
         # 外框（多方向覆蓋達到粗細）
         if self.settings.outline_enabled and text:
             p.setPen(self.settings.outline_color)
-            w = max(1, int(self.settings.outline_width))
+            base_w = max(1, int(self.settings.outline_width))
+            w = max(1, int(base_w * self.font().pointSize() / 32))
             for dx in range(-w, w + 1):
                 for dy in range(-w, w + 1):
                     if dx == 0 and dy == 0:
@@ -424,44 +420,40 @@ class TextStyleDialog(QtWidgets.QDialog):
                 a = max(0.0, min(1.0, float(self.dlg.shadow_alpha.value())))
                 dist = max(0, int(self.dlg.shadow_dist.value()))
                 blur = max(0, int(self.dlg.shadow_blur.value()))
-                dx, dy = dist, dist
-                if blur == 0:
+                directions = [
+                    (1, 0),
+                    (-1, 0),
+                    (0, 1),
+                    (0, -1),
+                    (1, 1),
+                    (1, -1),
+                    (-1, 1),
+                    (-1, -1),
+                ]
+                sc = QtGui.QColor(base)
+                sc.setAlphaF(a)
+                p.setPen(sc)
+                p.drawText(
+                    text_rect.translated(dist, dist),
+                    int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
+                    text,
+                )
+                for r in range(1, blur + 1):
+                    fall = a * (1 - r / (blur + 1)) ** 2
                     sc = QtGui.QColor(base)
-                    sc.setAlphaF(a)
-                    p.setPen(sc)
-                    p.drawText(
-                        text_rect.translated(dx, dy),
-                        int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
-                        text,
-                    )
-                else:
-                    rings = blur
-                    samples = 12
-                    for r in range(0, rings + 1):
-                        falloff = (1.0 - (r / (rings + 1.0))) ** 2
-                        sc = QtGui.QColor(base)
-                        sc.setAlphaF(a * falloff)
+                    sc.setAlphaF(fall)
+                    for ox, oy in directions:
                         p.setPen(sc)
-                        if r == 0:
-                            p.drawText(
-                                text_rect.translated(dx, dy),
-                                int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
-                                text,
-                            )
-                        else:
-                            for k in range(samples):
-                                ang = 2 * math.pi * (k / samples)
-                                ox = int(round(dx + r * math.cos(ang)))
-                                oy = int(round(dy + r * math.sin(ang)))
-                                p.drawText(
-                                    text_rect.translated(ox, oy),
-                                    int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
-                                    text,
-                                )
+                        p.drawText(
+                            text_rect.translated(dist + ox * r, dist + oy * r),
+                            int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
+                            text,
+                        )
 
             if self.dlg.outline_enabled.isChecked() and text:
                 p.setPen(self.dlg._outline_color)
-                w = max(1, int(self.dlg.outline_width.value()))
+                base_w = max(1, int(self.dlg.outline_width.value()))
+                w = max(1, int(base_w * self.dlg.font_size.value() / 32))
                 for dx in range(-w, w + 1):
                     for dy in range(-w, w + 1):
                         if dx == 0 and dy == 0:

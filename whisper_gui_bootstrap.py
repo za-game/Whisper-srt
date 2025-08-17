@@ -321,18 +321,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
             QtWidgets.QComboBox.showPopup(self.audio_device_combo)
         self.audio_device_combo.showPopup = _showPopup
 
-
-        # VAD 等級（mWhisperSub: --vad_level 0..3，預設 1）
-        self.vad_level_combo = QtWidgets.QComboBox()
-        self.vad_level_combo.addItems(["0", "1", "2", "3"])
-        self.vad_level_combo.setCurrentText("1")
-        form_layout.addRow("VAD 等級", self.vad_level_combo)
-
-        # VAD 模式
-        self.vad_mode_combo = QtWidgets.QComboBox()
-        self.vad_mode_combo.addItems(["Auto", "Off"])
-        self.vad_mode_combo.setCurrentText("Off")
-        form_layout.addRow("VAD 模式", self.vad_mode_combo)
+        # VAD 控制
+        self.vad_combo = QtWidgets.QComboBox()
+        self.vad_combo.addItems(["Off", "0", "1", "2", "3", "Auto"])
+        self.vad_combo.setCurrentText("1")
+        form_layout.addRow("VAD", self.vad_combo)
 
         # 靜音門檻秒數（mWhisperSub: --silence，預設 0.3）
         self.silence_spin = QtWidgets.QDoubleSpinBox()
@@ -427,8 +420,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.device_combo.currentIndexChanged.connect(self.device_changed)
         self.gpu_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.audio_device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
-        self.vad_level_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
-        self.vad_mode_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.vad_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.silence_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
         # 主視窗移動/縮放 → autosave main_window_geometry
         self.installEventFilter(self)
@@ -572,8 +564,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 "gpu_index": self.gpu_combo.currentIndex(),
                 "audio_device_text": self.audio_device_combo.currentText(),
                 "audio_device_index": self.audio_device_combo.currentIndex(),
-                "vad_level": self.vad_level_combo.currentText(),
-                "vad_mode": self.vad_mode_combo.currentText(),
+                "vad": self.vad_combo.currentText(),
                 "silence": float(self.silence_spin.value()),
             },
         }
@@ -635,12 +626,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
             gpu_idx = gui.get("gpu_index")
             if isinstance(gpu_idx, int) and 0 <= gpu_idx < self.gpu_combo.count():
                 self.gpu_combo.setCurrentIndex(gpu_idx)
-            vad = gui.get("vad_level")
+            vad = gui.get("vad")
             if vad:
-                self.vad_level_combo.setCurrentText(str(vad))
-            vad_mode = gui.get("vad_mode")
-            if vad_mode:
-                self.vad_mode_combo.setCurrentText(str(vad_mode))
+                self.vad_combo.setCurrentText(str(vad))
             silence = gui.get("silence")
             if silence is not None:
                 try: self.silence_spin.setValue(float(silence))
@@ -686,7 +674,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     try: self.srt_watcher.deleteLater()
                     except Exception: pass
                     self.srt_watcher = None
-                self.srt_watcher = LiveSRTWatcher(self.settings.srt_path, self)
+                self.srt_watcher = LiveSRTWatcher(
+                    self.settings.srt_path, self, initial_emit=True
+                )
                 if self.overlay:
                     self.srt_watcher.updated.connect(self.overlay.show_entry_text)
             self.status.appendPlainText(f"[Load] {p}")
@@ -744,7 +734,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 try: self.srt_watcher.deleteLater()
                 except Exception: pass
                 self.srt_watcher = None
-            self.srt_watcher = LiveSRTWatcher(self.settings.srt_path, self)
+            self.srt_watcher = LiveSRTWatcher(
+                self.settings.srt_path, self, initial_emit=True
+            )
             if self.overlay:
                 self.srt_watcher.updated.connect(self.overlay.show_entry_text)
             self.append_log(f"已選擇 SRT：{path}")
@@ -812,7 +804,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 level = 2
             else:
                 level = 3
-            self.vad_level_combo.setCurrentIndex(level)
+            self.vad_combo.setCurrentText(str(level))
             self.append_log(f"背景噪音 {noise_db:.1f} dB → 選擇 VAD {level}")
         except Exception as e:
             self.append_log(f"偵測失敗：{e}")
@@ -905,7 +897,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
             except Exception:
                 pass
             self.srt_watcher = None
-        self.srt_watcher = LiveSRTWatcher(self.settings.srt_path, self)
+        self.srt_watcher = LiveSRTWatcher(
+            self.settings.srt_path, self, initial_emit=True
+        )
         if self.overlay:
             self.srt_watcher.updated.connect(self.overlay.show_entry_text)
         # 聚焦：把新檔打開編輯（可選）
@@ -1221,10 +1215,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
             args += ["--sr", "auto"]
 
         # 傳遞 VAD 相關參數（永遠顯式傳遞，避免預設值不明）
-        args += ["--vad_level", self.vad_level_combo.currentText()]
-        args += ["--silence", f"{self.silence_spin.value():.2f}"]
-        if self.vad_mode_combo.currentText() == "Auto":
+        vad_opt = self.vad_combo.currentText()
+        if vad_opt not in ("Off", "Auto"):
+            args += ["--vad_level", vad_opt]
+        if vad_opt == "Auto":
             args += ["--auto-vad"]
+        args += ["--silence", f"{self.silence_spin.value():.2f}"]
         args += ["--logprob-thr", f"{self.logprob_spin.value():.2f}"]
         args += ["--compression-ratio-thr", f"{self.comp_ratio_spin.value():.2f}"]
         temp_str = self.temp_edit.text().strip()
@@ -1263,7 +1259,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 監看設定中的 srt_path → 更新最後一行到 overlay
         srt_path = self.settings.srt_path
         if self.srt_watcher is None:
-            self.srt_watcher = LiveSRTWatcher(srt_path, self)
+            self.srt_watcher = LiveSRTWatcher(
+                srt_path, self, initial_emit=True
+            )
         else:
             # 若 path 變了，換一個新的 watcher（避免舊 watcher 卡在舊路徑）
             if Path(srt_path).resolve() != Path(self.srt_watcher.srt_path).resolve():
@@ -1271,7 +1269,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     self.srt_watcher.deleteLater()
                 except Exception:
                     pass
-                self.srt_watcher = LiveSRTWatcher(srt_path, self)
+                self.srt_watcher = LiveSRTWatcher(
+                    srt_path, self, initial_emit=True
+                )
         # ── Fallback：當專案檔沒記錄 hotwords/srt 時，從專案資料夾補上；再不行就維持預設 ──
     def _fallback_fill_paths_from_dir(self, d: Path):
         def _latest(glob_pat: str) -> Optional[Path]:
@@ -1302,7 +1302,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     try: self.srt_watcher.deleteLater()
                     except Exception: pass
                     self.srt_watcher = None
-                self.srt_watcher = LiveSRTWatcher(self.settings.srt_path, self)
+                self.srt_watcher = LiveSRTWatcher(
+                    self.settings.srt_path, self, initial_emit=True
+                )
                 if self.overlay:
                     self.srt_watcher.updated.connect(self.overlay.show_entry_text)
                 self.append_log(f"專案 SRT：{srt}")
