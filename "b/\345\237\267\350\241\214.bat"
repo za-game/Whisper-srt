@@ -1,0 +1,3 @@
+@echo off
+set "ROOT=%~dp0"
+powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "& { Set-Location \"$env:ROOT\"; . .\\.venv\\Scripts\\Activate.ps1; python whisper_gui_bootstrap.py }"
