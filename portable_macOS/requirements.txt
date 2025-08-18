@@ -1,0 +1,6 @@
+PyQt5
+sounddevice
+numpy
+tqdm
+huggingface_hub
+pytest
