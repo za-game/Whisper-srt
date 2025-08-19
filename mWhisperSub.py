@@ -45,6 +45,16 @@ from faster_whisper import WhisperModel
 from transformers import pipeline
 from huggingface_hub import login as hf_login
 
+ROOT_DIR = Path(__file__).resolve().parent
+
+def _repo_local_dir(repo_id: str) -> Path:
+    d = ROOT_DIR / "hf_models" / repo_id.replace("/", "--")
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return d
+
 # 翻譯模型對應表（來源語言, 目標語言 -> HF Repo ID 清單）
 TRANSLATE_MODEL_MAP: Dict[tuple[str, str], List[str]] = {
     ("en", "ja"): ["Helsinki-NLP/opus-mt-en-ja", "Helsinki-NLP/opus-mt-en-jap"],
@@ -341,7 +351,13 @@ def _load_translate_pipe(src: str, tgt: str):
     if pipe is None:
         repos = TRANSLATE_MODEL_MAP.get(pair, [])
         pipe = None
-        for model in repos:
+        for repo in repos:
+            local_dir = _repo_local_dir(repo)
+            model = (
+                str(local_dir)
+                if local_dir.exists() and any(local_dir.iterdir())
+                else repo
+            )
             while True:
                 try:
                     pipe = pipeline("translation", model=model)
@@ -351,7 +367,11 @@ def _load_translate_pipe(src: str, tgt: str):
                     if "401" in err or "token" in err.lower():
                         if _prompt_hf_token():
                             continue
-                        log.warning("translation model %s requires authentication: %s", model, exc)
+                        log.warning(
+                            "translation model %s requires authentication: %s",
+                            model,
+                            exc,
+                        )
                         pipe = None
                         break
                     log.warning("translation model %s unavailable: %s", model, exc)

@@ -20,3 +20,7 @@ Whisper-srt 是一個利用 OpenAI Whisper 將音訊即時轉換成字幕並於�
 
 ## 設定
 所有設定會儲存在系統的 `QSettings` 中，下次啟動時會自動套用。
+
+## 模型儲存規則
+Whisper 語音模型與翻譯模型下載後會儲存在 `hf_models/<Repo>`，其中 Repo ID 的 `/` 會改為 `--`。
+啟動時程式會優先使用這些本地模型；若資料夾不存在則會改用 Hugging Face 快取或線上下載。

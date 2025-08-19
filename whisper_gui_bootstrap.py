@@ -520,16 +520,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
         repos = TRANSLATE_REPO_MAP.get(pair, [])
         if not repos:
             return True
-        try:
-            from huggingface_hub import snapshot_download
-        except Exception:
-            return False
         for repo in repos:
-            try:
-                snapshot_download(repo_id=repo, repo_type="model", local_files_only=True)
+            hf_dir = ROOT_DIR / "hf_models" / repo.replace("/", "--")
+            if hf_dir.exists() and any(hf_dir.iterdir()):
                 return True
-            except Exception:
-                continue
         return False
 
     def _on_lang_changed(self, idx: int):
@@ -563,7 +557,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         for repo in repos:
             while True:
                 try:
-                    self._download_model_with_progress(repo, use_local_dir=False)
+                    self._download_model_with_progress(repo)
                     return True
                 except Exception as e:
                     err = str(e)
