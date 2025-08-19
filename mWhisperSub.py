@@ -278,9 +278,9 @@ def zh_norm(text: str) -> str:
 _translate_pipes = {}
 
 
-def translate_text(text: str, lang: str) -> str:
+def _load_translate_pipe(lang: str):
     if lang == "en":
-        return text
+        return None
     pipe = _translate_pipes.get(lang)
     if pipe is None:
         model_map = {
@@ -296,16 +296,25 @@ def translate_text(text: str, lang: str) -> str:
             if "401" in str(exc) or "token" in str(exc).lower():
                 msg += "; run 'huggingface-cli login' to configure your token"
             log.warning(msg)
-            _translate_pipes[lang] = None
-            return text
+            pipe = None
         _translate_pipes[lang] = pipe
+    return pipe
+
+
+def translate_text(text: str, lang: str) -> str:
+    pipe = _load_translate_pipe(lang)
+    if pipe is None:
+        return text
     try:
-        if pipe is None:
-            return text
         return pipe(text, max_length=400)[0]["translation_text"]
     except Exception as exc:  # pragma: no cover - runtime dependency
         log.warning("translation to %s failed: %s", lang, exc)
         return text
+
+# Pre-load translation model before starting transcription so any
+# authentication prompts appear early.
+if args.translate:
+    _load_translate_pipe(args.translate_lang)
 
 # ─────────────────────────────────────────────────────────────
 # 7. Hotwords monitoring
