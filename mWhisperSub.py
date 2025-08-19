@@ -88,6 +88,12 @@ parser.add_argument("--dtype", default="int16", choices=["int16", "float32"])
 
 # 3-3 轉寫 & 分段參數
 parser.add_argument("--lang", default="zh")
+parser.add_argument("--translate", action="store_true")
+parser.add_argument(
+    "--translate_lang",
+    choices=["ja", "en", "ko"],
+    help="translation target language; only effective with --translate",
+)
 parser.add_argument("--win", type=float, default=4, help="分析視窗秒數")
 parser.add_argument("--maxhop", type=float, default=2.0, help="最長 MAXHOP 間隔")
 parser.add_argument("--silence", type=float, default=0.3, help="靜音句間隔下限")
@@ -307,10 +313,16 @@ def get_prompt() -> str | None:
 # 8. Single-file transcription mode (exit after done)
 # ─────────────────────────────────────────────────────────────
 if args.input_file:
-    segs, _ = model.transcribe(
-        args.input_file, language=args.lang, beam_size=args.beam, best_of=args.best_of,
-        word_timestamps=True, initial_prompt=get_prompt(),
-    )
+    transcribe_args = {
+        "language": args.translate_lang if args.translate else args.lang,
+        "beam_size": args.beam,
+        "best_of": args.best_of,
+        "word_timestamps": True,
+        "initial_prompt": get_prompt(),
+    }
+    if args.translate:
+        transcribe_args["task"] = "translate"
+    segs, _ = model.transcribe(args.input_file, **transcribe_args)
     subs = []
     for i, s in enumerate(segs, 1):
         txt = zh_norm(s.text.strip())
@@ -564,16 +576,18 @@ def consumer_worker():
             with model_lock:
                 segments = []
                 for temp in TEMPERATURES:
-                    segments, _ = model.transcribe(
-                        pcm_f,
-                        language=args.lang,
-                        beam_size=args.beam,
-                        best_of=args.best_of,
-                        condition_on_previous_text=False,
-                        word_timestamps=True,
-                        initial_prompt=use_prompt,
-                        temperature=temp,
-                    )
+                    transcribe_args = {
+                        "language": args.translate_lang if args.translate else args.lang,
+                        "beam_size": args.beam,
+                        "best_of": args.best_of,
+                        "condition_on_previous_text": False,
+                        "word_timestamps": True,
+                        "initial_prompt": use_prompt,
+                        "temperature": temp,
+                    }
+                    if args.translate:
+                        transcribe_args["task"] = "translate"
+                    segments, _ = model.transcribe(pcm_f, **transcribe_args)
                     if segments:
                         break
 
