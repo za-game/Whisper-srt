@@ -234,8 +234,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         self.translate_chk = QtWidgets.QCheckBox("翻譯")
         self.translate_lang_combo = QtWidgets.QComboBox()
-        self.translate_lang_combo.addItems(["ja", "en", "ko"])
-        self.translate_lang_combo.setCurrentText("en")
+        self.translate_lang_combo.addItems(["JA", "EN", "KO", "ZH"])
+        self.translate_lang_combo.setCurrentText("EN")
         self.translate_lang_combo.setEnabled(False)
         self.translate_chk.toggled.connect(self.translate_lang_combo.setEnabled)
         # 翻譯語言僅在勾選翻譯時生效
@@ -1245,7 +1245,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 語言（你預設要 zh；UI 選擇一律明確傳遞，避免分支縮排導致漏傳）
         args += ["--lang", self.lang_combo.currentText()]
         if self.translate_chk.isChecked():
-            args += ["--translate", "--translate_lang", self.translate_lang_combo.currentText()]
+            args += [
+                "--translate",
+                "--translate_lang",
+                self.translate_lang_combo.currentText().lower(),
+            ]
         if self.console_chk.isChecked():
             args += ["--log", self.log_level_combo.currentText()]
         # 中文轉換（OpenCC）
