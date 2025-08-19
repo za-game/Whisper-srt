@@ -30,7 +30,9 @@ import base64
 import shutil
 import importlib.util
 from pathlib import Path
+from functools import lru_cache
 from PyQt5 import QtCore, QtWidgets, QtGui
+from huggingface_hub import HfApi, HfHubError
 from project_io import save_project, load_project
 
 # Register text cursor/block types for thread-safe queued connections
@@ -84,6 +86,8 @@ TRANSLATE_REPO_MAP = {
     ("KO", "ZH"): ["Helsinki-NLP/opus-mt-ko-zh"],
     ("ZH", "KO"): ["Helsinki-NLP/opus-mt-zh-ko"],
 }
+
+_hf_api = HfApi()
 
 # ──────────── 錄音設備偵測 ────────────
 def list_audio_devices():
@@ -239,15 +243,22 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         # 模型選擇
         self.model_combo = QtWidgets.QComboBox()
+        self.model_combo.addItem("(未選擇)", None)
         for m in ["tiny", "base", "small", "medium", "large-v2"]:
             self.model_combo.addItem(m, m)
         form_layout.addRow("模型", self.model_combo)
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
+        saved_model = self.settings._qs.value("model", "", type=str)
+        if saved_model:
+            idx = self.model_combo.findData(saved_model)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
 
         # 語言選擇
         self.lang_combo = QtWidgets.QComboBox()
         self.lang_combo.addItems(["auto", "zh", "ja", "en", "ko"])
-        self.lang_combo.setCurrentText("zh")  # 預設就是 zh
+        saved_lang = self.settings._qs.value("lang", "zh", type=str)
+        self.lang_combo.setCurrentText(saved_lang)
         form_layout.addRow("語言", self.lang_combo)
 
         self.translate_chk = QtWidgets.QCheckBox("翻譯")
@@ -258,6 +269,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.lang_combo.currentIndexChanged.connect(self._on_lang_changed)
         # 翻譯語言僅在勾選翻譯時生效
         form_layout.addRow(self.translate_chk, self.translate_lang_combo)
+        saved_translate = bool(self.settings._qs.value("translate", False, type=bool))
+        self.translate_chk.setChecked(saved_translate)
 
         # 終端機顯示與 log 等級
         self.console_chk = QtWidgets.QCheckBox("顯示終端機")
@@ -413,6 +426,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.status.setReadOnly(True)
         self.status.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
         main_layout.addWidget(self.status)
+        self._reported_unsupported: set[tuple[str, str]] = set()
 
         self.start_btn = QtWidgets.QPushButton("開始轉寫")
         self.start_btn.clicked.connect(self.start_clicked)
@@ -457,6 +471,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         self._last_model_index = self.model_combo.currentIndex()
         self._refresh_model_items()
+        self._update_model_default()
+        self._update_model_default()
         QtCore.QTimer.singleShot(100, self.check_env)
         # project autosave
         self._autosave_timer = QtCore.QTimer(self)
@@ -485,6 +501,13 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 啟動時嘗試還原上次專案（使用全域 QSettings）
         QtCore.QTimer.singleShot(0, self._auto_open_last_project)
         self._on_lang_changed(self.lang_combo.currentIndex())
+        saved_pair = self.settings._qs.value("translate_pair", "", type=str)
+        if saved_pair and "-" in saved_pair:
+            src, tgt = saved_pair.split("-", 1)
+            for i in range(self.translate_lang_combo.count()):
+                if self.translate_lang_combo.itemData(i) == (src, tgt):
+                    self.translate_lang_combo.setCurrentIndex(i)
+                    break
         self._last_translate_index = self.translate_lang_combo.currentIndex()
         # —— 統一的本地模型資料夾：hf_models/<Repo> —— #
     def _repo_local_dir(self, repo_id: str) -> Path:
@@ -509,19 +532,53 @@ class BootstrapWin(QtWidgets.QMainWindow):
         model = self.model_combo.model()
         for i in range(self.model_combo.count()):
             base = self.model_combo.itemData(i)
+            if not base:
+                continue
             available = self._model_downloaded(base)
             text = base if available else f"{base} (未下載)"
             self.model_combo.setItemText(i, text)
             brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
             model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
 
+    def _update_model_default(self):
+        model = self.model_combo.model()
+        available_indices = []
+        for i in range(1, self.model_combo.count()):
+            text = self.model_combo.itemText(i)
+            if "(未下載)" not in text:
+                available_indices.append(i)
+        if available_indices:
+            model.setData(model.index(0, 0), 0, QtCore.Qt.UserRole - 1)
+            if self.model_combo.currentIndex() == 0:
+                self.model_combo.setCurrentIndex(available_indices[0])
+        else:
+            model.setData(model.index(0, 0), 1, QtCore.Qt.UserRole - 1)
+            self.model_combo.setCurrentIndex(0)
+
     def _translate_model_downloaded(self, pair: tuple[str, str]) -> bool:
         repos = TRANSLATE_REPO_MAP.get(pair, [])
         if not repos:
-            return True
+            return False
         for repo in repos:
             hf_dir = ROOT_DIR / "hf_models" / repo.replace("/", "--")
             if hf_dir.exists() and any(hf_dir.iterdir()):
+                return True
+        return False
+
+    @lru_cache(maxsize=None)
+    def _translate_pair_supported(self, pair: tuple[str, str]) -> bool:
+        repos = TRANSLATE_REPO_MAP.get(pair, [])
+        if not repos:
+            return False
+        for repo in repos:
+            try:
+                _hf_api.model_info(repo)
+                return True
+            except HfHubError as e:
+                if getattr(getattr(e, "response", None), "status_code", None) == 404:
+                    continue
+                return True
+            except Exception:
                 return True
         return False
 
@@ -530,11 +587,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
         targets = [code for code in ["JA", "EN", "KO", "ZH"] if code != src]
         self.translate_lang_combo.blockSignals(True)
         self.translate_lang_combo.clear()
+        self.translate_lang_combo.addItem("(未選擇)", None)
         for tgt in targets:
             self.translate_lang_combo.addItem(f"{src}→{tgt}", (src, tgt))
-        self.translate_lang_combo.setCurrentIndex(0)
         self.translate_lang_combo.blockSignals(False)
         self._refresh_translate_items()
+        self._update_translate_default()
         self._last_translate_index = self.translate_lang_combo.currentIndex()
         self.schedule_autosave(300)
 
@@ -542,17 +600,43 @@ class BootstrapWin(QtWidgets.QMainWindow):
         model = self.translate_lang_combo.model()
         for i in range(self.translate_lang_combo.count()):
             pair = self.translate_lang_combo.itemData(i)
+            if not pair:
+                continue
             src, tgt = pair
-            available = self._translate_model_downloaded(pair)
-            text = f"{src}→{tgt}" if available else f"{src}→{tgt} (未下載)"
+            supported = self._translate_pair_supported(pair)
+            available = supported and self._translate_model_downloaded(pair)
+            if not supported:
+                text = f"{src}→{tgt} (不支援)"
+                pair_tup = (src, tgt)
+                if pair_tup not in self._reported_unsupported:
+                    self.status.appendPlainText(f"[缺少翻譯模型] {src}→{tgt}")
+                    self._reported_unsupported.add(pair_tup)
+            elif available:
+                text = f"{src}→{tgt}"
+            else:
+                text = f"{src}→{tgt} (未下載)"
             self.translate_lang_combo.setItemText(i, text)
-            brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
+            brush = None if supported and available else QtGui.QBrush(QtGui.QColor("gray"))
             model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
+
+    def _update_translate_default(self):
+        model = self.translate_lang_combo.model()
+        available_indices = []
+        for i in range(1, self.translate_lang_combo.count()):
+            text = self.translate_lang_combo.itemText(i)
+            if "(未下載)" not in text and "(不支援)" not in text:
+                available_indices.append(i)
+        if available_indices:
+            model.setData(model.index(0, 0), 0, QtCore.Qt.UserRole - 1)
+            self.translate_lang_combo.setCurrentIndex(available_indices[0])
+        else:
+            model.setData(model.index(0, 0), 1, QtCore.Qt.UserRole - 1)
+            self.translate_lang_combo.setCurrentIndex(0)
 
     def _download_translate_model(self, pair: tuple[str, str]) -> bool:
         repos = TRANSLATE_REPO_MAP.get(pair, [])
         if not repos:
-            return True
+            return False
         for repo in repos:
             while True:
                 try:
@@ -609,26 +693,27 @@ class BootstrapWin(QtWidgets.QMainWindow):
         return True
 
     def _on_translate_lang_changed(self, idx: int):
+        if idx < 0:
+            return
+        text = self.translate_lang_combo.itemText(idx)
         pair = self.translate_lang_combo.itemData(idx)
-        if not self._translate_model_downloaded(pair):
+        if "(不支援)" in text:
+            QtWidgets.QMessageBox.warning(self, "翻譯模型", "此語言對不支援翻譯")
+            self.translate_lang_combo.blockSignals(True)
+            self.translate_lang_combo.setCurrentIndex(0)
+            self.translate_lang_combo.blockSignals(False)
+            self._last_translate_index = 0
+            return
+        if "(未下載)" in text and pair:
             src, tgt = pair
-            resp = QtWidgets.QMessageBox.question(
-                self,
-                "下載翻譯模型",
-                f"翻譯模型 {src}→{tgt} 未下載，現在下載嗎？",
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-            )
-            if resp == QtWidgets.QMessageBox.Yes:
-                if not self._download_translate_model(pair):
-                    self.translate_lang_combo.blockSignals(True)
-                    self.translate_lang_combo.setCurrentIndex(self._last_translate_index)
-                    self.translate_lang_combo.blockSignals(False)
-                    return
+            if self._download_translate_model(pair):
                 self._refresh_translate_items()
+                self._update_translate_default()
             else:
                 self.translate_lang_combo.blockSignals(True)
-                self.translate_lang_combo.setCurrentIndex(self._last_translate_index)
+                self.translate_lang_combo.setCurrentIndex(0)
                 self.translate_lang_combo.blockSignals(False)
+                self._last_translate_index = 0
                 return
         self._last_translate_index = self.translate_lang_combo.currentIndex()
         self.schedule_autosave(300)
@@ -644,6 +729,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
     def _on_model_changed(self, idx: int):
         base = self.model_combo.itemData(idx)
+        if not base:
+            self._last_model_index = idx
+            self.schedule_autosave(300)
+            return
         if not self._model_downloaded(base):
             resp = QtWidgets.QMessageBox.question(
                 self,
@@ -658,10 +747,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 except Exception as e:
                     QtWidgets.QMessageBox.warning(self, "下載失敗", str(e))
                 self._refresh_model_items()
+                self._update_model_default()
             else:
                 self.model_combo.blockSignals(True)
-                self.model_combo.setCurrentIndex(self._last_model_index)
+                self.model_combo.setCurrentIndex(0)
                 self.model_combo.blockSignals(False)
+                self._last_model_index = 0
                 return
         self._last_model_index = self.model_combo.currentIndex()
         self.schedule_autosave(300)
@@ -702,6 +793,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
         p = self._project_path()
         if not p:
             return
+        pair = self.translate_lang_combo.currentData()
+        self.settings._qs.setValue("model", self.model_combo.currentData() or "")
+        self.settings._qs.setValue("lang", self.lang_combo.currentText())
+        self.settings._qs.setValue("translate", bool(self.translate_chk.isChecked()))
+        self.settings._qs.setValue("translate_pair", f"{pair[0]}-{pair[1]}" if pair else "")
         overlay_bundle = None
         if self.overlay:
             overlay_bundle = self.overlay.to_dict()
@@ -735,6 +831,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 "srt_path": str(self.settings.srt_path) if getattr(self.settings, "srt_path", None) else "",
                 "model": self.model_combo.currentData(),
                 "lang": self.lang_combo.currentText(),
+                "translate": bool(self.translate_chk.isChecked()),
+                "translate_pair": list(self.translate_lang_combo.currentData() or []),
                 "console": bool(self.console_chk.isChecked()),
                 "log_level": self.log_level_combo.currentText(),
                 "zh_mode": self.zh_combo.currentText(),
@@ -787,6 +885,16 @@ class BootstrapWin(QtWidgets.QMainWindow):
             lang = gui.get("lang")
             if lang:
                 self.lang_combo.setCurrentText(lang)
+            translate = gui.get("translate")
+            if translate is not None:
+                self.translate_chk.setChecked(bool(translate))
+            pair = gui.get("translate_pair")
+            if isinstance(pair, list) and len(pair) == 2:
+                tup = (pair[0], pair[1])
+                for i in range(self.translate_lang_combo.count()):
+                    if self.translate_lang_combo.itemData(i) == tup:
+                        self.translate_lang_combo.setCurrentIndex(i)
+                        break
             console = gui.get("console")
             if console is not None:
                 self.console_chk.setChecked(bool(console))
@@ -868,6 +976,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         except Exception as e:
             self.status.appendPlainText(f"[Load] 失敗: {e}")
         self._refresh_model_items()
+        self._update_model_default()
 
     def schedule_autosave(self, delay_ms: int = 300):
         self._autosave_pending = True
