@@ -67,11 +67,14 @@ MODEL_REPO_MAP = {
     "large-v2": "Systran/faster-whisper-large-v2",
 }
 
-# 翻譯模型對應表（GUI 簡碼 -> HF Repo ID）
+# 翻譯模型對應表（GUI 簡碼 -> HF Repo ID 清單）
+# 有些語言在 Hugging Face 上的 Repo 命名不一致，例如日文常見
+# 的有 "en-ja" 與 "en-jap" 兩種，因此以候選列表方式處理，若
+# 第一個 Repo 找不到則嘗試後續候選，以提高相容性。
 TRANSLATE_REPO_MAP = {
-    "JA": "Helsinki-NLP/opus-mt-en-ja",
-    "KO": "Helsinki-NLP/opus-mt-en-ko",
-    "ZH": "Helsinki-NLP/opus-mt-en-zh",
+    "JA": ["Helsinki-NLP/opus-mt-en-ja", "Helsinki-NLP/opus-mt-en-jap"],
+    "KO": ["Helsinki-NLP/opus-mt-en-ko"],
+    "ZH": ["Helsinki-NLP/opus-mt-en-zh"],
 }
 
 # ──────────── 錄音設備偵測 ────────────
@@ -507,15 +510,20 @@ class BootstrapWin(QtWidgets.QMainWindow):
             model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
 
     def _translate_model_downloaded(self, lang: str) -> bool:
-        repo = TRANSLATE_REPO_MAP.get(lang)
-        if not repo:
+        repos = TRANSLATE_REPO_MAP.get(lang, [])
+        if not repos:
             return True
         try:
             from huggingface_hub import snapshot_download
-            snapshot_download(repo_id=repo, repo_type="model", local_files_only=True)
-            return True
         except Exception:
             return False
+        for repo in repos:
+            try:
+                snapshot_download(repo_id=repo, repo_type="model", local_files_only=True)
+                return True
+            except Exception:
+                continue
+        return False
 
     def _refresh_translate_items(self):
         model = self.translate_lang_combo.model()
@@ -526,6 +534,26 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.translate_lang_combo.setItemText(i, text)
             brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
             model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
+
+    def _download_translate_model(self, code: str) -> bool:
+        repos = TRANSLATE_REPO_MAP.get(code, [])
+        if not repos:
+            return True
+        for repo in repos:
+            while True:
+                try:
+                    self._download_model_with_progress(repo, use_local_dir=False)
+                    return True
+                except Exception as e:
+                    err = str(e)
+                    if "404" in err or "Repository Not Found" in err:
+                        break  # 試下一個候選 repo
+                    if "401" in err or "token" in err.lower():
+                        if self._prompt_hf_token():
+                            continue
+                    QtWidgets.QMessageBox.warning(self, "下載失敗", err)
+                    return False
+        return False
 
     def _prompt_hf_token(self) -> bool:
         dialog = QtWidgets.QDialog(self)
@@ -576,21 +604,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
             )
             if resp == QtWidgets.QMessageBox.Yes:
-                repo = TRANSLATE_REPO_MAP.get(code)
-                while True:
-                    try:
-                        self._download_model_with_progress(repo, use_local_dir=False)
-                        break
-                    except Exception as e:
-                        err = str(e)
-                        if "401" in err or "token" in err.lower():
-                            if self._prompt_hf_token():
-                                continue
-                        QtWidgets.QMessageBox.warning(self, "下載失敗", err)
-                        self.translate_lang_combo.blockSignals(True)
-                        self.translate_lang_combo.setCurrentIndex(self._last_translate_index)
-                        self.translate_lang_combo.blockSignals(False)
-                        return
+                if not self._download_translate_model(code):
+                    self.translate_lang_combo.blockSignals(True)
+                    self.translate_lang_combo.setCurrentIndex(self._last_translate_index)
+                    self.translate_lang_combo.blockSignals(False)
+                    return
                 self._refresh_translate_items()
             else:
                 self.translate_lang_combo.blockSignals(True)
