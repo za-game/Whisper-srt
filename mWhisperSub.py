@@ -43,6 +43,7 @@ import unicodedata as ud
 import webrtcvad
 from faster_whisper import WhisperModel
 from transformers import pipeline
+from huggingface_hub import login as hf_login
 
 # ─────────────────────────────────────────────────────────────
 # 2. Global State & Constants (mutable ones are initialised later)
@@ -280,6 +281,42 @@ def zh_norm(text: str) -> str:
 _translate_pipes = {}
 
 
+def _prompt_hf_token() -> bool:
+    """Prompt the user for a Hugging Face token via GUI or CLI."""
+    try:
+        from PyQt5 import QtWidgets  # type: ignore
+    except Exception:  # pragma: no cover
+        QtWidgets = None  # type: ignore
+
+    if QtWidgets and QtWidgets.QApplication.instance():  # pragma: no cover - requires GUI
+        token, ok = QtWidgets.QInputDialog.getText(
+            None,
+            "Hugging Face Login",
+            "Enter your Hugging Face token:",
+        )
+        if not ok or not token:
+            return False
+        try:
+            hf_login(token)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(None, "Hugging Face Login", str(exc))
+            return False
+        QtWidgets.QMessageBox.information(None, "Hugging Face Login", "Login successful")
+        return True
+
+    if sys.stdin.isatty():
+        print("translation model requires a HuggingFace token")
+        try:
+            subprocess.run(["huggingface-cli", "login"], check=True)
+        except Exception:  # pragma: no cover
+            print("run 'huggingface-cli login' in another terminal")
+            input("Press Enter after completing login to retry...")
+        return True
+
+    log.warning("translation model requires authentication but no GUI or TTY is available")
+    return False
+
+
 def _load_translate_pipe(lang: str):
     if lang == "en":
         return None
@@ -298,13 +335,7 @@ def _load_translate_pipe(lang: str):
             except Exception as exc:  # pragma: no cover - runtime dependency
                 err = str(exc)
                 if "401" in err or "token" in err.lower():
-                    if sys.stdin.isatty():
-                        print("translation model requires a HuggingFace token")
-                        try:
-                            subprocess.run(["huggingface-cli", "login"], check=True)
-                        except Exception:
-                            print("run 'huggingface-cli login' in another terminal")
-                        input("Press Enter to retry downloading the translation model...")
+                    if _prompt_hf_token():
                         continue
                     log.warning("translation model %s requires authentication: %s", model, exc)
                     pipe = None
