@@ -25,6 +25,8 @@ import os
 import queue
 import threading
 import time
+import subprocess
+import sys
 from collections import deque
 from datetime import timedelta
 from pathlib import Path
@@ -289,14 +291,27 @@ def _load_translate_pipe(lang: str):
             "zh": "Helsinki-NLP/opus-mt-en-zh",
         }
         model = model_map[lang]
-        try:
-            pipe = pipeline("translation", model=model)
-        except Exception as exc:  # pragma: no cover - runtime dependency
-            msg = f"translation model {model} unavailable: {exc}"
-            if "401" in str(exc) or "token" in str(exc).lower():
-                msg += "; run 'huggingface-cli login' to configure your token"
-            log.warning(msg)
-            pipe = None
+        while True:
+            try:
+                pipe = pipeline("translation", model=model)
+                break
+            except Exception as exc:  # pragma: no cover - runtime dependency
+                err = str(exc)
+                if "401" in err or "token" in err.lower():
+                    if sys.stdin.isatty():
+                        print("translation model requires a HuggingFace token")
+                        try:
+                            subprocess.run(["huggingface-cli", "login"], check=True)
+                        except Exception:
+                            print("run 'huggingface-cli login' in another terminal")
+                        input("Press Enter to retry downloading the translation model...")
+                        continue
+                    log.warning("translation model %s requires authentication: %s", model, exc)
+                    pipe = None
+                    break
+                log.warning("translation model %s unavailable: %s", model, exc)
+                pipe = None
+                break
         _translate_pipes[lang] = pipe
     return pipe
 
