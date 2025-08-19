@@ -67,6 +67,13 @@ MODEL_REPO_MAP = {
     "large-v2": "Systran/faster-whisper-large-v2",
 }
 
+# 翻譯模型對應表（GUI 簡碼 -> HF Repo ID）
+TRANSLATE_REPO_MAP = {
+    "JA": "Helsinki-NLP/opus-mt-en-ja",
+    "KO": "Helsinki-NLP/opus-mt-en-ko",
+    "ZH": "Helsinki-NLP/opus-mt-en-zh",
+}
+
 # ──────────── 錄音設備偵測 ────────────
 def list_audio_devices():
     devices = []
@@ -234,10 +241,13 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         self.translate_chk = QtWidgets.QCheckBox("翻譯")
         self.translate_lang_combo = QtWidgets.QComboBox()
-        self.translate_lang_combo.addItems(["JA", "EN", "KO", "ZH"])
+        for code in ["JA", "EN", "KO", "ZH"]:
+            self.translate_lang_combo.addItem(code, code)
         self.translate_lang_combo.setCurrentText("EN")
         self.translate_lang_combo.setEnabled(False)
         self.translate_chk.toggled.connect(self.translate_lang_combo.setEnabled)
+        self.translate_lang_combo.currentIndexChanged.connect(self._on_translate_lang_changed)
+        self._last_translate_index = self.translate_lang_combo.currentIndex()
         # 翻譯語言僅在勾選翻譯時生效
         form_layout.addRow(self.translate_chk, self.translate_lang_combo)
 
@@ -439,6 +449,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         self._last_model_index = self.model_combo.currentIndex()
         self._refresh_model_items()
+        self._refresh_translate_items()
         QtCore.QTimer.singleShot(100, self.check_env)
         # project autosave
         self._autosave_timer = QtCore.QTimer(self)
@@ -494,6 +505,75 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.model_combo.setItemText(i, text)
             brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
             model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
+
+    def _translate_model_downloaded(self, lang: str) -> bool:
+        repo = TRANSLATE_REPO_MAP.get(lang)
+        if not repo:
+            return True
+        try:
+            from huggingface_hub import snapshot_download
+            snapshot_download(repo_id=repo, repo_type="model", local_files_only=True)
+            return True
+        except Exception:
+            return False
+
+    def _refresh_translate_items(self):
+        model = self.translate_lang_combo.model()
+        for i in range(self.translate_lang_combo.count()):
+            code = self.translate_lang_combo.itemData(i)
+            available = self._translate_model_downloaded(code)
+            text = code if available else f"{code} (未下載)"
+            self.translate_lang_combo.setItemText(i, text)
+            brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
+            model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
+
+    def _prompt_hf_token(self) -> bool:
+        token, ok = QtWidgets.QInputDialog.getText(
+            self, "Hugging Face Login", "Enter your Hugging Face token:")
+        if not ok or not token:
+            return False
+        try:
+            from huggingface_hub import login as hf_login
+            hf_login(token)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Hugging Face Login", str(exc))
+            return False
+        QtWidgets.QMessageBox.information(self, "Hugging Face Login", "Login successful")
+        return True
+
+    def _on_translate_lang_changed(self, idx: int):
+        code = self.translate_lang_combo.itemData(idx)
+        if not self._translate_model_downloaded(code):
+            resp = QtWidgets.QMessageBox.question(
+                self,
+                "下載翻譯模型",
+                f"翻譯模型 {code} 未下載，現在下載嗎？",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            )
+            if resp == QtWidgets.QMessageBox.Yes:
+                repo = TRANSLATE_REPO_MAP.get(code)
+                while True:
+                    try:
+                        self._download_model_with_progress(repo, use_local_dir=False)
+                        break
+                    except Exception as e:
+                        err = str(e)
+                        if "401" in err or "token" in err.lower():
+                            if self._prompt_hf_token():
+                                continue
+                        QtWidgets.QMessageBox.warning(self, "下載失敗", err)
+                        self.translate_lang_combo.blockSignals(True)
+                        self.translate_lang_combo.setCurrentIndex(self._last_translate_index)
+                        self.translate_lang_combo.blockSignals(False)
+                        return
+                self._refresh_translate_items()
+            else:
+                self.translate_lang_combo.blockSignals(True)
+                self.translate_lang_combo.setCurrentIndex(self._last_translate_index)
+                self.translate_lang_combo.blockSignals(False)
+                return
+        self._last_translate_index = self.translate_lang_combo.currentIndex()
+        self.schedule_autosave(300)
 
     def _set_model_name(self, name: str):
         for i in range(self.model_combo.count()):
@@ -1089,20 +1169,18 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.append_log(f"安裝失敗: {e}")
         self.check_env()
 
-    def _download_model_with_progress(self, repo_id: str):
-        """
-        使用 snapshot_download + 自訂 Qt 版 tqdm，顯示**位元組級**真實進度。
-        """
+    def _download_model_with_progress(self, repo_id: str, use_local_dir: bool = True):
+        """使用 snapshot_download + Qt 版 tqdm 顯示下載進度。"""
         try:
             from huggingface_hub import snapshot_download
         except Exception:
             raise RuntimeError("缺少 huggingface_hub，請先完成套件安裝")
 
-        # 顯示快取路徑（診斷用）
-        hf_cache = os.environ.get("HUGGINGFACE_HUB_CACHE") or os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
+        hf_cache = os.environ.get("HUGGINGFACE_HUB_CACHE") or os.path.join(
+            os.path.expanduser("~"), ".cache", "huggingface", "hub"
+        )
         self.append_log(f"HuggingFace cache: {hf_cache}")
 
-        # 進度對話框（byte 級）
         dlg = QtWidgets.QProgressDialog("準備下載…", "取消", 0, 100, self)
         dlg.setWindowTitle("下載語言模型")
         dlg.setWindowModality(QtCore.Qt.WindowModal)
@@ -1110,7 +1188,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         dlg.setAutoClose(False)
         dlg.setAutoReset(False)
         bar = QtWidgets.QProgressBar(dlg)
-        bar.setRange(0, 0)  # 未知進度時顯示忙碌動畫
+        bar.setRange(0, 0)
         dlg.setBar(bar)
         dlg.show()
 
@@ -1128,8 +1206,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         result = {"error": None}  # None=成功, "cancelled"=使用者取消, 其他=錯誤訊息
 
         class QtTqdm(tqdm.tqdm):
-            """最簡做法：直接用 tqdm 的 desc 與 n/total → 以 0–100% 顯示目前這條下載列"""
-
+            """最簡做法：以 0–100% 顯示目前這條下載列"""
             def __init__(self, *args, **kwargs):
                 # 僅顯示「檔案下載」那種 bytes 進度列；像 'Fetching N files' 一律關閉
                 unit = kwargs.get("unit")
@@ -1170,18 +1247,24 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         def worker():
             try:
-                # ✅ 不分平台：一律下載到專案內的 hf_models/<Repo>
-                local_dir = self._repo_local_dir(repo_id)
-                QtCore.QMetaObject.invokeMethod(
-                    self, "append_log", QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(str, f"下載到本地模型資料夾：{local_dir}")
-                )
-                snapshot_download(
-                    repo_id=repo_id,
-                    repo_type="model",
-                    local_dir=str(local_dir),   # 新版 hub: 指定 local_dir 即為實體檔，無 symlink
-                    tqdm_class=QtTqdm,
-                )
+                if use_local_dir:
+                    local_dir = self._repo_local_dir(repo_id)
+                    QtCore.QMetaObject.invokeMethod(
+                        self, "append_log", QtCore.Qt.QueuedConnection,
+                        QtCore.Q_ARG(str, f"下載到本地模型資料夾：{local_dir}")
+                    )
+                    snapshot_download(
+                        repo_id=repo_id,
+                        repo_type="model",
+                        local_dir=str(local_dir),
+                        tqdm_class=QtTqdm,
+                    )
+                else:
+                    snapshot_download(
+                        repo_id=repo_id,
+                        repo_type="model",
+                        tqdm_class=QtTqdm,
+                    )
             except RuntimeError as e:
                 # 只有在「真的中途取消」時才記為 cancelled
                 if "取消下載" in str(e):
