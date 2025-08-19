@@ -40,6 +40,7 @@ import srt
 import unicodedata as ud
 import webrtcvad
 from faster_whisper import WhisperModel
+from transformers import pipeline
 
 # ─────────────────────────────────────────────────────────────
 # 2. Global State & Constants (mutable ones are initialised later)
@@ -91,7 +92,7 @@ parser.add_argument("--lang", default="zh")
 parser.add_argument("--translate", action="store_true")
 parser.add_argument(
     "--translate_lang",
-    choices=["ja", "en", "ko"],
+    choices=["ja", "en", "ko", "zh"],
     help="translation target language; only effective with --translate",
 )
 parser.add_argument("--win", type=float, default=4, help="分析視窗秒數")
@@ -273,6 +274,22 @@ def zh_norm(text: str) -> str:
     except Exception:
         return text
 
+
+_translate_pipes = {}
+
+
+def translate_text(text: str, lang: str) -> str:
+    if lang == "en":
+        return text
+    if lang not in _translate_pipes:
+        model_map = {
+            "ko": "Helsinki-NLP/opus-mt-en-ko",
+            "ja": "Helsinki-NLP/opus-mt-en-ja",
+            "zh": "Helsinki-NLP/opus-mt-en-zh",
+        }
+        _translate_pipes[lang] = pipeline("translation", model=model_map[lang])
+    return _translate_pipes[lang](text, max_length=400)[0]["translation_text"]
+
 # ─────────────────────────────────────────────────────────────
 # 7. Hotwords monitoring
 # ─────────────────────────────────────────────────────────────
@@ -314,7 +331,7 @@ def get_prompt() -> str | None:
 # ─────────────────────────────────────────────────────────────
 if args.input_file:
     transcribe_args = {
-        "language": args.translate_lang if args.translate else args.lang,
+        "language": args.lang,
         "beam_size": args.beam,
         "best_of": args.best_of,
         "word_timestamps": True,
@@ -325,7 +342,13 @@ if args.input_file:
     segs, _ = model.transcribe(args.input_file, **transcribe_args)
     subs = []
     for i, s in enumerate(segs, 1):
-        txt = zh_norm(s.text.strip())
+        txt = s.text.strip()
+        if args.translate:
+            txt = translate_text(txt, args.translate_lang)
+            if args.translate_lang == "zh":
+                txt = zh_norm(txt)
+        else:
+            txt = zh_norm(txt)
         if is_style_echo(txt) or is_prompt_echo(txt, _hotwords):
             continue
         subs.append(srt.Subtitle(i, timedelta(seconds=s.start), timedelta(seconds=s.end), txt))
@@ -577,7 +600,7 @@ def consumer_worker():
                 segments = []
                 for temp in TEMPERATURES:
                     transcribe_args = {
-                        "language": args.translate_lang if args.translate else args.lang,
+                        "language": args.lang,
                         "beam_size": args.beam,
                         "best_of": args.best_of,
                         "condition_on_previous_text": False,
@@ -618,7 +641,13 @@ def consumer_worker():
                         and compression_ratio(raw_txt) > args.compression_ratio_thr
                     ):
                         continue
-                    txt = zh_norm(raw_txt.strip())
+                    txt = raw_txt.strip()
+                    if args.translate:
+                        txt = translate_text(txt, args.translate_lang)
+                        if args.translate_lang == "zh":
+                            txt = zh_norm(txt)
+                    else:
+                        txt = zh_norm(txt)
                     if is_style_echo(txt) or is_prompt_echo(txt, _hotwords):
                         continue
                     if freq_words:

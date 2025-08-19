@@ -3,4 +3,6 @@ sounddevice
 numpy
 tqdm
 huggingface_hub
+transformers
+sentencepiece
 pytest
