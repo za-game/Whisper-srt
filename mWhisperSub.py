@@ -283,12 +283,16 @@ def translate_text(text: str, lang: str) -> str:
         return text
     if lang not in _translate_pipes:
         model_map = {
-            "ko": "Helsinki-NLP/opus-mt-en-ko",
-            "ja": "Helsinki-NLP/opus-mt-en-ja",
-            "zh": "Helsinki-NLP/opus-mt-en-zh",
+            "ko": ("Helsinki-NLP/opus-mt-en-ko", "translation_en_to_ko"),
+            "ja": ("Helsinki-NLP/opus-mt-en-ja", "translation_en_to_ja"),
+            "zh": ("Helsinki-NLP/opus-mt-en-zh", "translation_en_to_zh"),
         }
-        _translate_pipes[lang] = pipeline("translation", model=model_map[lang])
-    return _translate_pipes[lang](text, max_length=400)[0]["translation_text"]
+        model, task = model_map[lang]
+        _translate_pipes[lang] = pipeline(task, model=model)
+    try:
+        return _translate_pipes[lang](text, max_length=400)[0]["translation_text"]
+    except Exception:
+        return text if lang == "en" else ""
 
 # ─────────────────────────────────────────────────────────────
 # 7. Hotwords monitoring
