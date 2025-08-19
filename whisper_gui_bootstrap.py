@@ -228,9 +228,18 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         # 語言選擇
         self.lang_combo = QtWidgets.QComboBox()
-        self.lang_combo.addItems(["auto", "zh", "en"])
+        self.lang_combo.addItems(["auto", "zh", "ja", "en", "ko"])
         self.lang_combo.setCurrentText("zh")  # 預設就是 zh
         form_layout.addRow("語言", self.lang_combo)
+
+        self.translate_chk = QtWidgets.QCheckBox("翻譯")
+        self.translate_lang_combo = QtWidgets.QComboBox()
+        self.translate_lang_combo.addItems(["ja", "en", "ko"])
+        self.translate_lang_combo.setCurrentText("en")
+        self.translate_lang_combo.setEnabled(False)
+        self.translate_chk.toggled.connect(self.translate_lang_combo.setEnabled)
+        # 翻譯語言僅在勾選翻譯時生效
+        form_layout.addRow(self.translate_chk, self.translate_lang_combo)
 
         # 終端機顯示與 log 等級
         self.console_chk = QtWidgets.QCheckBox("顯示終端機")
@@ -1235,6 +1244,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.append_log(f"使用 Hugging Face 模型：{repo}（若已在快取將直接重用）")
         # 語言（你預設要 zh；UI 選擇一律明確傳遞，避免分支縮排導致漏傳）
         args += ["--lang", self.lang_combo.currentText()]
+        if self.translate_chk.isChecked():
+            args += ["--translate", "--translate_lang", self.translate_lang_combo.currentText()]
         if self.console_chk.isChecked():
             args += ["--log", self.log_level_combo.currentText()]
         # 中文轉換（OpenCC）
