@@ -256,8 +256,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.translate_chk.toggled.connect(self.translate_lang_combo.setEnabled)
         self.translate_lang_combo.currentIndexChanged.connect(self._on_translate_lang_changed)
         self.lang_combo.currentIndexChanged.connect(self._on_lang_changed)
-        self._on_lang_changed(self.lang_combo.currentIndex())
-        self._last_translate_index = self.translate_lang_combo.currentIndex()
         # 翻譯語言僅在勾選翻譯時生效
         form_layout.addRow(self.translate_chk, self.translate_lang_combo)
 
@@ -459,7 +457,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         self._last_model_index = self.model_combo.currentIndex()
         self._refresh_model_items()
-        self._refresh_translate_items()
         QtCore.QTimer.singleShot(100, self.check_env)
         # project autosave
         self._autosave_timer = QtCore.QTimer(self)
@@ -487,6 +484,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.installEventFilter(self)
         # 啟動時嘗試還原上次專案（使用全域 QSettings）
         QtCore.QTimer.singleShot(0, self._auto_open_last_project)
+        self._on_lang_changed(self.lang_combo.currentIndex())
+        self._last_translate_index = self.translate_lang_combo.currentIndex()
         # —— 統一的本地模型資料夾：hf_models/<Repo> —— #
     def _repo_local_dir(self, repo_id: str) -> Path:
         d = (ROOT_DIR / "hf_models" / repo_id.replace("/", "--"))
