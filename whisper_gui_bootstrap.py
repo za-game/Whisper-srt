@@ -67,14 +67,22 @@ MODEL_REPO_MAP = {
     "large-v2": "Systran/faster-whisper-large-v2",
 }
 
-# 翻譯模型對應表（GUI 簡碼 -> HF Repo ID 清單）
-# 有些語言在 Hugging Face 上的 Repo 命名不一致，例如日文常見
-# 的有 "en-ja" 與 "en-jap" 兩種，因此以候選列表方式處理，若
-# 第一個 Repo 找不到則嘗試後續候選，以提高相容性。
+# 翻譯模型對應表（來源語言, 目標語言 -> HF Repo ID 清單）
+# Hugging Face 上的 Repo 命名偶有差異，例如日文常見
+# "ja" 與 "jap" 兩種寫法，故使用候選列表方式以提升相容性。
 TRANSLATE_REPO_MAP = {
-    "JA": ["Helsinki-NLP/opus-mt-en-ja", "Helsinki-NLP/opus-mt-en-jap"],
-    "KO": ["Helsinki-NLP/opus-mt-en-ko"],
-    "ZH": ["Helsinki-NLP/opus-mt-en-zh"],
+    ("EN", "JA"): ["Helsinki-NLP/opus-mt-en-ja", "Helsinki-NLP/opus-mt-en-jap"],
+    ("JA", "EN"): ["Helsinki-NLP/opus-mt-ja-en", "Helsinki-NLP/opus-mt-jap-en"],
+    ("EN", "KO"): ["Helsinki-NLP/opus-mt-en-ko"],
+    ("KO", "EN"): ["Helsinki-NLP/opus-mt-ko-en"],
+    ("EN", "ZH"): ["Helsinki-NLP/opus-mt-en-zh"],
+    ("ZH", "EN"): ["Helsinki-NLP/opus-mt-zh-en"],
+    ("JA", "KO"): ["Helsinki-NLP/opus-mt-ja-ko", "Helsinki-NLP/opus-mt-jap-ko"],
+    ("KO", "JA"): ["Helsinki-NLP/opus-mt-ko-ja", "Helsinki-NLP/opus-mt-ko-jap"],
+    ("JA", "ZH"): ["Helsinki-NLP/opus-mt-ja-zh", "Helsinki-NLP/opus-mt-jap-zh"],
+    ("ZH", "JA"): ["Helsinki-NLP/opus-mt-zh-ja", "Helsinki-NLP/opus-mt-zh-jap"],
+    ("KO", "ZH"): ["Helsinki-NLP/opus-mt-ko-zh"],
+    ("ZH", "KO"): ["Helsinki-NLP/opus-mt-zh-ko"],
 }
 
 # ──────────── 錄音設備偵測 ────────────
@@ -244,12 +252,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         self.translate_chk = QtWidgets.QCheckBox("翻譯")
         self.translate_lang_combo = QtWidgets.QComboBox()
-        for code in ["JA", "EN", "KO", "ZH"]:
-            self.translate_lang_combo.addItem(code, code)
-        self.translate_lang_combo.setCurrentText("EN")
         self.translate_lang_combo.setEnabled(False)
         self.translate_chk.toggled.connect(self.translate_lang_combo.setEnabled)
         self.translate_lang_combo.currentIndexChanged.connect(self._on_translate_lang_changed)
+        self.lang_combo.currentIndexChanged.connect(self._on_lang_changed)
+        self._on_lang_changed(self.lang_combo.currentIndex())
         self._last_translate_index = self.translate_lang_combo.currentIndex()
         # 翻譯語言僅在勾選翻譯時生效
         form_layout.addRow(self.translate_chk, self.translate_lang_combo)
@@ -509,8 +516,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
             brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
             model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
 
-    def _translate_model_downloaded(self, lang: str) -> bool:
-        repos = TRANSLATE_REPO_MAP.get(lang, [])
+    def _translate_model_downloaded(self, pair: tuple[str, str]) -> bool:
+        repos = TRANSLATE_REPO_MAP.get(pair, [])
         if not repos:
             return True
         try:
@@ -525,18 +532,32 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 continue
         return False
 
+    def _on_lang_changed(self, idx: int):
+        src = self.lang_combo.itemText(idx).upper()
+        targets = [code for code in ["JA", "EN", "KO", "ZH"] if code != src]
+        self.translate_lang_combo.blockSignals(True)
+        self.translate_lang_combo.clear()
+        for tgt in targets:
+            self.translate_lang_combo.addItem(f"{src}→{tgt}", (src, tgt))
+        self.translate_lang_combo.setCurrentIndex(0)
+        self.translate_lang_combo.blockSignals(False)
+        self._refresh_translate_items()
+        self._last_translate_index = self.translate_lang_combo.currentIndex()
+        self.schedule_autosave(300)
+
     def _refresh_translate_items(self):
         model = self.translate_lang_combo.model()
         for i in range(self.translate_lang_combo.count()):
-            code = self.translate_lang_combo.itemData(i)
-            available = self._translate_model_downloaded(code)
-            text = code if available else f"{code} (未下載)"
+            pair = self.translate_lang_combo.itemData(i)
+            src, tgt = pair
+            available = self._translate_model_downloaded(pair)
+            text = f"{src}→{tgt}" if available else f"{src}→{tgt} (未下載)"
             self.translate_lang_combo.setItemText(i, text)
             brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
             model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
 
-    def _download_translate_model(self, code: str) -> bool:
-        repos = TRANSLATE_REPO_MAP.get(code, [])
+    def _download_translate_model(self, pair: tuple[str, str]) -> bool:
+        repos = TRANSLATE_REPO_MAP.get(pair, [])
         if not repos:
             return True
         for repo in repos:
@@ -595,16 +616,17 @@ class BootstrapWin(QtWidgets.QMainWindow):
         return True
 
     def _on_translate_lang_changed(self, idx: int):
-        code = self.translate_lang_combo.itemData(idx)
-        if not self._translate_model_downloaded(code):
+        pair = self.translate_lang_combo.itemData(idx)
+        if not self._translate_model_downloaded(pair):
+            src, tgt = pair
             resp = QtWidgets.QMessageBox.question(
                 self,
                 "下載翻譯模型",
-                f"翻譯模型 {code} 未下載，現在下載嗎？",
+                f"翻譯模型 {src}→{tgt} 未下載，現在下載嗎？",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
             )
             if resp == QtWidgets.QMessageBox.Yes:
-                if not self._download_translate_model(code):
+                if not self._download_translate_model(pair):
                     self.translate_lang_combo.blockSignals(True)
                     self.translate_lang_combo.setCurrentIndex(self._last_translate_index)
                     self.translate_lang_combo.blockSignals(False)
@@ -1371,10 +1393,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 語言（你預設要 zh；UI 選擇一律明確傳遞，避免分支縮排導致漏傳）
         args += ["--lang", self.lang_combo.currentText()]
         if self.translate_chk.isChecked():
+            pair = self.translate_lang_combo.currentData()
             args += [
                 "--translate",
                 "--translate_lang",
-                self.translate_lang_combo.currentText().lower(),
+                pair[1].lower(),
             ]
         if self.console_chk.isChecked():
             args += ["--log", self.log_level_combo.currentText()]

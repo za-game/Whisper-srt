@@ -31,7 +31,7 @@ from collections import deque
 from datetime import timedelta
 from pathlib import Path
 from difflib import SequenceMatcher
-from typing import Deque, List, Tuple
+from typing import Any, Deque, List, Tuple, Dict
 import re
 import zlib
 
@@ -44,6 +44,22 @@ import webrtcvad
 from faster_whisper import WhisperModel
 from transformers import pipeline
 from huggingface_hub import login as hf_login
+
+# 翻譯模型對應表（來源語言, 目標語言 -> HF Repo ID 清單）
+TRANSLATE_MODEL_MAP: Dict[tuple[str, str], List[str]] = {
+    ("en", "ja"): ["Helsinki-NLP/opus-mt-en-ja", "Helsinki-NLP/opus-mt-en-jap"],
+    ("ja", "en"): ["Helsinki-NLP/opus-mt-ja-en", "Helsinki-NLP/opus-mt-jap-en"],
+    ("en", "ko"): ["Helsinki-NLP/opus-mt-en-ko"],
+    ("ko", "en"): ["Helsinki-NLP/opus-mt-ko-en"],
+    ("en", "zh"): ["Helsinki-NLP/opus-mt-en-zh"],
+    ("zh", "en"): ["Helsinki-NLP/opus-mt-zh-en"],
+    ("ja", "ko"): ["Helsinki-NLP/opus-mt-ja-ko", "Helsinki-NLP/opus-mt-jap-ko"],
+    ("ko", "ja"): ["Helsinki-NLP/opus-mt-ko-ja", "Helsinki-NLP/opus-mt-ko-jap"],
+    ("ja", "zh"): ["Helsinki-NLP/opus-mt-ja-zh", "Helsinki-NLP/opus-mt-jap-zh"],
+    ("zh", "ja"): ["Helsinki-NLP/opus-mt-zh-ja", "Helsinki-NLP/opus-mt-zh-jap"],
+    ("ko", "zh"): ["Helsinki-NLP/opus-mt-ko-zh"],
+    ("zh", "ko"): ["Helsinki-NLP/opus-mt-zh-ko"],
+}
 
 # ─────────────────────────────────────────────────────────────
 # 2. Global State & Constants (mutable ones are initialised later)
@@ -278,7 +294,7 @@ def zh_norm(text: str) -> str:
         return text
 
 
-_translate_pipes = {}
+_translate_pipes: Dict[tuple[str, str], Any] = {}
 
 
 def _prompt_hf_token() -> bool:
@@ -317,50 +333,50 @@ def _prompt_hf_token() -> bool:
     return False
 
 
-def _load_translate_pipe(lang: str):
-    if lang == "en":
+def _load_translate_pipe(src: str, tgt: str):
+    pair = (src, tgt)
+    if src == tgt:
         return None
-    pipe = _translate_pipes.get(lang)
+    pipe = _translate_pipes.get(pair)
     if pipe is None:
-        model_map = {
-            "ko": "Helsinki-NLP/opus-mt-en-ko",
-            "ja": "Helsinki-NLP/opus-mt-en-ja",
-            "zh": "Helsinki-NLP/opus-mt-en-zh",
-        }
-        model = model_map[lang]
-        while True:
-            try:
-                pipe = pipeline("translation", model=model)
-                break
-            except Exception as exc:  # pragma: no cover - runtime dependency
-                err = str(exc)
-                if "401" in err or "token" in err.lower():
-                    if _prompt_hf_token():
-                        continue
-                    log.warning("translation model %s requires authentication: %s", model, exc)
+        repos = TRANSLATE_MODEL_MAP.get(pair, [])
+        pipe = None
+        for model in repos:
+            while True:
+                try:
+                    pipe = pipeline("translation", model=model)
+                    break
+                except Exception as exc:  # pragma: no cover - runtime dependency
+                    err = str(exc)
+                    if "401" in err or "token" in err.lower():
+                        if _prompt_hf_token():
+                            continue
+                        log.warning("translation model %s requires authentication: %s", model, exc)
+                        pipe = None
+                        break
+                    log.warning("translation model %s unavailable: %s", model, exc)
                     pipe = None
                     break
-                log.warning("translation model %s unavailable: %s", model, exc)
-                pipe = None
+            if pipe is not None:
                 break
-        _translate_pipes[lang] = pipe
+        _translate_pipes[pair] = pipe
     return pipe
 
 
-def translate_text(text: str, lang: str) -> str:
-    pipe = _load_translate_pipe(lang)
+def translate_text(text: str, src: str, tgt: str) -> str:
+    pipe = _load_translate_pipe(src, tgt)
     if pipe is None:
         return text
     try:
         return pipe(text, max_length=400)[0]["translation_text"]
     except Exception as exc:  # pragma: no cover - runtime dependency
-        log.warning("translation to %s failed: %s", lang, exc)
+        log.warning("translation %s→%s failed: %s", src, tgt, exc)
         return text
 
 # Pre-load translation model before starting transcription so any
 # authentication prompts appear early.
-if args.translate:
-    _load_translate_pipe(args.translate_lang)
+if args.translate and args.lang != "auto":
+    _load_translate_pipe(args.lang, args.translate_lang)
 
 # ─────────────────────────────────────────────────────────────
 # 7. Hotwords monitoring
@@ -409,14 +425,13 @@ if args.input_file:
         "word_timestamps": True,
         "initial_prompt": get_prompt(),
     }
-    if args.translate:
-        transcribe_args["task"] = "translate"
-    segs, _ = model.transcribe(args.input_file, **transcribe_args)
+    segs, info = model.transcribe(args.input_file, **transcribe_args)
+    src_lang = info.language if args.lang == "auto" else args.lang
     subs = []
     for i, s in enumerate(segs, 1):
         txt = s.text.strip()
         if args.translate:
-            txt = translate_text(txt, args.translate_lang)
+            txt = translate_text(txt, src_lang, args.translate_lang)
             if args.translate_lang == "zh":
                 txt = zh_norm(txt)
         else:
@@ -680,11 +695,10 @@ def consumer_worker():
                         "initial_prompt": use_prompt,
                         "temperature": temp,
                     }
-                    if args.translate:
-                        transcribe_args["task"] = "translate"
-                    segments, _ = model.transcribe(pcm_f, **transcribe_args)
+                    segments, info = model.transcribe(pcm_f, **transcribe_args)
                     if segments:
                         break
+            src_lang = info.language if args.lang == "auto" else args.lang
 
             origin = audio_origin or 0.0
             for seg in segments:
@@ -715,7 +729,7 @@ def consumer_worker():
                         continue
                     txt = raw_txt.strip()
                     if args.translate:
-                        txt = translate_text(txt, args.translate_lang)
+                        txt = translate_text(txt, src_lang, args.translate_lang)
                         if args.translate_lang == "zh":
                             txt = zh_norm(txt)
                     else:
