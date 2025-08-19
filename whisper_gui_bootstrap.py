@@ -528,9 +528,34 @@ class BootstrapWin(QtWidgets.QMainWindow):
             model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
 
     def _prompt_hf_token(self) -> bool:
-        token, ok = QtWidgets.QInputDialog.getText(
-            self, "Hugging Face Login", "Enter your Hugging Face token:")
-        if not ok or not token:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Hugging Face Login")
+        layout = QtWidgets.QVBoxLayout(dialog)
+
+        label = QtWidgets.QLabel(
+            "Enter your Hugging Face token. Get one at "
+            "<a href=\"https://huggingface.co/settings/tokens\">"
+            "https://huggingface.co/settings/tokens</a>"
+        )
+        label.setOpenExternalLinks(True)
+        layout.addWidget(label)
+
+        line_edit = QtWidgets.QLineEdit()
+        line_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        layout.addWidget(line_edit)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return False
+
+        token = line_edit.text().strip()
+        if not token:
             return False
         try:
             from huggingface_hub import login as hf_login
