@@ -63,10 +63,11 @@ with (ROOT_DIR / "Config.json").open(encoding="utf-8") as f:
     CONFIG = json.load(f)
 MODEL_PATH = (ROOT_DIR / CONFIG.get("model_path", "models")).resolve()
 MODEL_PATH.mkdir(parents=True, exist_ok=True)
-HF_CACHE = MODEL_PATH / "hf_cache"
-HF_CACHE.mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(HF_CACHE))
-os.environ.setdefault("TRANSFORMERS_CACHE", str(HF_CACHE))
+CACHE_DEFAULT = str(Path.home() / ".cache" / "huggingface" / "hub")
+CACHE_PATH = Path(CONFIG.get("cache_path", CACHE_DEFAULT)).expanduser().resolve()
+CACHE_PATH.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(CACHE_PATH))
+os.environ.setdefault("TRANSFORMERS_CACHE", str(CACHE_PATH))
 MODEL_REPO_MAP = CONFIG["MODEL_REPO_MAP"]
 TRANSLATE_REPO_MAP = {
     tuple(k.split("-")): v for k, v in CONFIG["TRANSLATE_REPO_MAP"].items()
@@ -476,6 +477,14 @@ class BootstrapWin(QtWidgets.QMainWindow):
     def _repo_local_dir(self, repo_id: str) -> Path:
         return MODEL_PATH / repo_id.replace("/", "--")
 
+    def _cached_model_dir(self, repo_id: str) -> Path | None:
+        snap_root = CACHE_PATH / f"models--{repo_id.replace('/', '--')}" / "snapshots"
+        if snap_root.exists():
+            for p in snap_root.iterdir():
+                if any(p.iterdir()):
+                    return p
+        return None
+
     def _update_translate_lang_options(self):
         opts = ["JA", "EN", "KO", "ZH"]
         src = self.lang_combo.currentText().upper()
@@ -508,6 +517,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
     def _model_downloaded(self, name: str) -> bool:
         repo = MODEL_REPO_MAP.get(name, name)
+        if self._cached_model_dir(repo):
+            return True
         paths = [
             MODEL_PATH / name,
             MODEL_PATH / repo.replace("/", "--"),
@@ -518,6 +529,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
         return False
 
     def _translate_model_downloaded(self, repo: str) -> bool:
+        if self._cached_model_dir(repo):
+            return True
         paths = [
             MODEL_PATH / repo,
             MODEL_PATH / repo.replace("/", "--"),
@@ -1193,8 +1206,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             raise RuntimeError("缺少 huggingface_hub，請先完成套件安裝")
 
         # 顯示快取路徑（診斷用）
-        hf_cache = os.environ.get("HUGGINGFACE_HUB_CACHE") or os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
-        self.append_log(f"HuggingFace cache: {hf_cache}")
+        self.append_log(f"HuggingFace cache: {CACHE_PATH}")
 
         # 進度對話框（byte 級）
         dlg = QtWidgets.QProgressDialog("準備下載…", "取消", 0, 100, self)
@@ -1274,7 +1286,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     repo_id=repo_id,
                     repo_type="model",
                     local_dir=str(local_dir),   # 新版 hub: 指定 local_dir 即為實體檔，無 symlink
-                    cache_dir=str(HF_CACHE),
+                    cache_dir=str(CACHE_PATH),
                     tqdm_class=QtTqdm,
                 )
             except RuntimeError as e:
@@ -1314,16 +1326,20 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.append_log("啟動中…")
         QtWidgets.QApplication.processEvents()
         # 顯示 Hugging Face 快取（診斷用）
-        hf_cache = os.environ.get("HUGGINGFACE_HUB_CACHE") or os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
-        self.append_log(f"HuggingFace cache: {hf_cache}")
+        self.append_log(f"HuggingFace cache: {CACHE_PATH}")
         # 收集參數
         args = []
         # 模型：本地有就用路徑；沒有就用名稱交給 faster-whisper 下載
         model_name = self.model_combo.currentData()
         repo = MODEL_REPO_MAP.get(model_name, model_name)
+        cache_dir = self._cached_model_dir(repo)
         name_dir = MODEL_PATH / model_name
         repo_dir = MODEL_PATH / repo.replace("/", "--")
-        if name_dir.exists() and any(name_dir.iterdir()):
+        if cache_dir:
+            use_dir = cache_dir.resolve()
+            args += ["--model_dir", str(use_dir)]
+            self.append_log(f"使用本地模型：{use_dir}")
+        elif name_dir.exists() and any(name_dir.iterdir()):
             use_dir = name_dir.resolve()
             args += ["--model_dir", str(use_dir)]
             self.append_log(f"使用本地模型：{use_dir}")
@@ -1388,7 +1404,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
             args += ["--temperature", temp_str]
         # 啟動 mWhisperSub（在 Windows 上讓它進入新的 process group，之後可用 CTRL_BREAK_EVENT 做優雅關閉）
         env = os.environ.copy()
-        env.setdefault("HF_HOME", str(MODEL_PATH))
         popen_kwargs = {"cwd": ROOT_DIR, "env": env}
         if os.name == "nt":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]

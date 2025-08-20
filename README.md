@@ -38,4 +38,4 @@ Whisper-srt 是一個利用 OpenAI Whisper 將音訊即時轉換成字幕並於�
 ## 模型下載設定
 所有語音與翻譯模型的下載網址及儲存路徑集中於 `Config.json`，
 欲更換鏡像或更新版本時，修改此檔即可。預設 `model_path` 為專案根目錄下的 `models`。
-GUI 下載的模型與啟動時的模型搜尋都會使用此路徑；Hugging Face 快取將存於其中的 `hf_cache` 子目錄，避免產生額外空資料夾。
+GUI 下載的模型與啟動時的模型搜尋都會使用此路徑；`cache_path` 可設定 Hugging Face 暫存位置，預設為系統的 `~/.cache/huggingface/hub`。

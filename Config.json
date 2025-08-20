@@ -1,5 +1,6 @@
 {
   "model_path": "models",
+  "cache_path": "~/.cache/huggingface/hub",
   "MODEL_REPO_MAP": {
     "tiny": "Systran/faster-whisper-tiny",
     "base": "Systran/faster-whisper-base",
