@@ -142,12 +142,30 @@ def available_cuda_tags(max_cuda: int) -> list[str]:
             return [f"cu{n}" for n in range(max_cuda, 110, -1)]
         return []
 
-
-def recommend_cuda_version(cuda_version):
+def _driver_to_cuda(driver_version: str | None) -> int:
+    if not driver_version:
+        return 0
     try:
-        max_cuda = int(cuda_version.replace(".", ""))
+        major = int(driver_version.split(".")[0])
     except Exception:
-        max_cuda = 0
+        return 0
+    mapping = [
+        (551, 126),
+        (550, 125),
+        (549, 124),
+        (548, 123),
+        (535, 122),
+        (531, 121),
+        (528, 120),
+        (520, 118),
+    ]
+    for min_drv, cuda in mapping:
+        if major >= min_drv:
+            return cuda
+    return 0
+
+def recommend_cuda_version(driver_version):
+    max_cuda = _driver_to_cuda(driver_version)
     best_tag: Optional[str] = None
     best_ver: Optional[str] = None
     for tag in available_cuda_tags(max_cuda):
@@ -576,12 +594,17 @@ class BootstrapWin(QtWidgets.QMainWindow):
             model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
             if available:
                 available_items.append((i, code))
+        placeholder_idx = self.translate_lang_combo.findData("")
         if available_items:
+            if placeholder_idx != -1:
+                self.translate_lang_combo.removeItem(placeholder_idx)
             target = next((i for i, c in available_items if c == "EN"), available_items[0][0])
             self.translate_lang_combo.setCurrentIndex(target)
         else:
-            self.translate_lang_combo.insertItem(0, "未選擇", "")
-            self.translate_lang_combo.setCurrentIndex(0)
+            if placeholder_idx == -1:
+                self.translate_lang_combo.insertItem(0, "未選擇", "")
+                placeholder_idx = 0
+            self.translate_lang_combo.setCurrentIndex(placeholder_idx)
         self.translate_lang_combo.blockSignals(False)
         self._last_trans_index = self.translate_lang_combo.currentIndex()
 
@@ -1225,35 +1248,51 @@ class BootstrapWin(QtWidgets.QMainWindow):
     def check_env(self):
         gpu_name, driver_ver, cuda_ver = detect_gpu()
         self.refresh_gpu_list()
-        if gpu_name and cuda_ver:
-            cuda_tag, _ = recommend_cuda_version(cuda_ver)
-            self.cuda_tag = cuda_tag
-            self.gpu_label.setText(f"GPU: {gpu_name}")
-            self.driver_label.setText(f"驅動版本: {driver_ver}")
-            self.append_log(
-                f"偵測到 GPU: {gpu_name} | 驅動: {driver_ver} | 推薦 CUDA: {cuda_tag}"
-            )
-        else:
-            self.cuda_tag = "cpu"
-            self.gpu_label.setText("GPU: 無")
-            self.driver_label.setText("驅動版本: 無")
-            self.append_log("未偵測到 NVIDIA GPU，將使用 CPU 模式")
-
+        rec_tag, _ = recommend_cuda_version(driver_ver) if driver_ver else ("cpu", latest_torch_version("cpu"))
         torch_ver = _torch_version()
         torch_ok = torch_ver is not None and is_installed("faster_whisper")
+        installed_tag = None
         if torch_ver:
             try:
                 import torch  # type: ignore
 
                 state = torch.__version__
+                if torch.cuda.is_available() and torch.version.cuda:
+                    installed_tag = f"cu{torch.version.cuda.replace('.', '')}"
+                    self.cuda_tag = installed_tag
+                    if not gpu_name:
+                        gpu_name = torch.cuda.get_device_name(0)
+                else:
+                    self.cuda_tag = rec_tag
             except Exception:
                 state = str(torch_ver)
+                self.cuda_tag = rec_tag
             if torch_ver < MIN_TORCH:
                 state += f" (需升級至 {MIN_TORCH})"
         else:
             state = "未安裝"
-        self.pkg_label.setText(f"torch/CUDA: {state} (推薦 {self.cuda_tag})")
-        self._update_cuda_option(torch_ok and self.cuda_tag != "cpu")
+            self.cuda_tag = rec_tag
+
+        if not gpu_name:
+            self.gpu_label.setText("GPU: 無")
+            self.driver_label.setText("驅動版本: 無")
+            self.append_log("未偵測到 NVIDIA GPU，將使用 CPU 模式")
+        else:
+            self.gpu_label.setText(f"GPU: {gpu_name}")
+            self.driver_label.setText(f"驅動版本: {driver_ver}")
+            if self.cuda_tag == installed_tag:
+                self.append_log(
+                    f"偵測到 GPU: {gpu_name} | 驅動: {driver_ver} | 已安裝 CUDA: {self.cuda_tag}"
+                )
+            else:
+                self.append_log(
+                    f"偵測到 GPU: {gpu_name} | 驅動: {driver_ver} | 推薦 CUDA: {rec_tag}"
+                )
+
+        if rec_tag == "cpu" and installed_tag:
+            rec_tag = installed_tag
+        self.pkg_label.setText(f"torch/CUDA: {state} (推薦 {rec_tag})")
+        self._update_cuda_option(torch_ok and (installed_tag or rec_tag != "cpu"))
         if torch_ok:
             if torch_ver and torch_ver < MIN_TORCH:
                 self.append_log(f"PyTorch 版本過低，翻譯模型需 {MIN_TORCH}+。")
@@ -1317,7 +1356,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
     def install_torch_cuda(self):
         try:
             gpu_name, driver_ver, cuda_ver = detect_gpu()
-            cuda_tag, torch_ver = recommend_cuda_version(cuda_ver) if gpu_name else ("cpu", latest_torch_version("cpu"))
+            cuda_tag, torch_ver = recommend_cuda_version(driver_ver) if gpu_name else ("cpu", latest_torch_version("cpu"))
             self.cuda_tag = cuda_tag
             info = torch_ver or "latest"
             self.append_log(
