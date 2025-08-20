@@ -1,5 +1,5 @@
 {
-  "model_path": "hf_models",
+  "model_path": "models",
   "MODEL_REPO_MAP": {
     "tiny": "Systran/faster-whisper-tiny",
     "base": "Systran/faster-whisper-base",

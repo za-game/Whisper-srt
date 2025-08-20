@@ -69,7 +69,7 @@ CONF_THR_STEP = 0.02
 # 讀取共用設定
 ROOT_DIR = Path(__file__).resolve().parent
 CONFIG = json.loads((ROOT_DIR / "Config.json").read_text(encoding="utf-8"))
-MODEL_PATH = ROOT_DIR / CONFIG.get("model_path", "hf_models")
+MODEL_PATH = ROOT_DIR / CONFIG.get("model_path", "models")
 MODEL_PATH.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("HF_HOME", str(MODEL_PATH))
 _REPO_MAP = CONFIG["MODEL_REPO_MAP"]

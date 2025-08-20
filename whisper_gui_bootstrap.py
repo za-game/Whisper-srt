@@ -61,7 +61,7 @@ OVERLAY_PY = ROOT_DIR / "srt_overlay_tool.py"
 
 with (ROOT_DIR / "Config.json").open(encoding="utf-8") as f:
     CONFIG = json.load(f)
-MODEL_PATH = (ROOT_DIR / CONFIG.get("model_path", "hf_models")).resolve()
+MODEL_PATH = (ROOT_DIR / CONFIG.get("model_path", "models")).resolve()
 MODEL_PATH.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("HF_HOME", str(MODEL_PATH))
 MODEL_REPO_MAP = CONFIG["MODEL_REPO_MAP"]
@@ -239,6 +239,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.translate_lang_combo.setEnabled(False)
         self.translate_chk.toggled.connect(self.translate_lang_combo.setEnabled)
         self.lang_combo.currentTextChanged.connect(self._update_translate_lang_options)
+        self.translate_lang_combo.currentIndexChanged.connect(self._on_translate_lang_changed)
         self._update_translate_lang_options()
         # 翻譯語言僅在勾選翻譯時生效
         form_layout.addRow(self.translate_chk, self.translate_lang_combo)
@@ -482,16 +483,38 @@ class BootstrapWin(QtWidgets.QMainWindow):
         src = self.lang_combo.currentText().upper()
         if src in opts:
             opts.remove(src)
+        self.translate_lang_combo.blockSignals(True)
         self.translate_lang_combo.clear()
-        self.translate_lang_combo.addItems(opts)
+        model = self.translate_lang_combo.model()
+        for i, code in enumerate(opts):
+            pair = (src.lower(), code.lower())
+            repo = TRANSLATE_REPO_MAP.get(pair)
+            available = True
+            if repo:
+                available = self._translate_model_downloaded(repo)
+            text = code if available else f"{code} (未下載)"
+            self.translate_lang_combo.addItem(text, code)
+            brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
+            model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
         if "EN" in opts:
-            self.translate_lang_combo.setCurrentText("EN")
+            self.translate_lang_combo.setCurrentIndex(opts.index("EN"))
         elif opts:
             self.translate_lang_combo.setCurrentIndex(0)
+        self.translate_lang_combo.blockSignals(False)
+        self._last_trans_index = self.translate_lang_combo.currentIndex()
 
     def _model_downloaded(self, name: str) -> bool:
         local_dir = ROOT_DIR / "models" / name
         repo = MODEL_REPO_MAP.get(name, name)
+        hf_dir = MODEL_PATH / repo.replace("/", "--")
+        if local_dir.exists() and any(local_dir.iterdir()):
+            return True
+        if hf_dir.exists() and any(hf_dir.iterdir()):
+            return True
+        return False
+
+    def _translate_model_downloaded(self, repo: str) -> bool:
+        local_dir = ROOT_DIR / "models" / repo.replace("/", "--")
         hf_dir = MODEL_PATH / repo.replace("/", "--")
         if local_dir.exists() and any(local_dir.iterdir()):
             return True
@@ -541,6 +564,30 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 return
         self._last_model_index = self.model_combo.currentIndex()
         self.schedule_autosave(300)
+
+    def _on_translate_lang_changed(self, idx: int):
+        src = self.lang_combo.currentText().lower()
+        tgt = self.translate_lang_combo.itemData(idx).lower()
+        repo = TRANSLATE_REPO_MAP.get((src, tgt))
+        if repo and not self._translate_model_downloaded(repo):
+            resp = QtWidgets.QMessageBox.question(
+                self,
+                "下載模型",
+                f"翻譯模型 {repo} 未下載，現在下載嗎？",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            )
+            if resp == QtWidgets.QMessageBox.Yes:
+                try:
+                    self._download_model_with_progress(repo)
+                except Exception as e:
+                    QtWidgets.QMessageBox.warning(self, "下載失敗", str(e))
+                self._update_translate_lang_options()
+            else:
+                self.translate_lang_combo.blockSignals(True)
+                self.translate_lang_combo.setCurrentIndex(self._last_trans_index)
+                self.translate_lang_combo.blockSignals(False)
+                return
+        self._last_trans_index = idx
     def closeEvent(self, ev: QtGui.QCloseEvent):
         ev.ignore()
         self.hide()
