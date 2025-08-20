@@ -222,6 +222,9 @@ def _probe_torch_with_backoff(
     else:
         plat_tags = ["manylinux", "linux_x86_64"]
     for spec in TORCH_PROBE_SERIES:
+        spec_label = spec or "最新版"
+        if log_fn:
+            log_fn(f"檢查 {cuda_tag} 通道 {spec_label}")
         with tempfile.TemporaryDirectory() as tmp:
             try:
                 run_pip(
@@ -231,28 +234,41 @@ def _probe_torch_with_backoff(
                         "--index-url",
                         index_url,
                         f"torch{spec}",
-                        "-q",
                         "-d",
                         tmp,
                     ],
                     log_fn=log_fn,
                 )
-            except subprocess.CalledProcessError:
+            except subprocess.CalledProcessError as e:
+                if log_fn:
+                    log_fn(f"{cuda_tag} 通道下載 torch{spec_label} 失敗：{e}")
                 continue
             wheels = list(Path(tmp).glob("torch-*.whl"))
             if not wheels:
+                if log_fn:
+                    log_fn(f"{cuda_tag} 通道 torch{spec_label} 沒有找到輪檔")
                 continue
             name = wheels[0].name
             if py_tag not in name:
+                if log_fn:
+                    log_fn(f"{name} 不含 Python 標籤 {py_tag}")
                 continue
             if not any(tag in name for tag in plat_tags):
+                if log_fn:
+                    log_fn(f"{name} 不含平台標籤 {plat_tags}")
                 continue
             m = re.search(r"torch-([\d\.]+)", name)
             if not m:
+                if log_fn:
+                    log_fn(f"{name} 無法解析版本")
                 continue
             ver = version.parse(m.group(1))
             if ver < MIN_TORCH:
+                if log_fn:
+                    log_fn(f"{name} 版本 {ver} 低於需求 {MIN_TORCH}")
                 continue
+            if log_fn:
+                log_fn(f"選擇 torch {ver} ({cuda_tag})")
             return str(ver), index_url
     if log_fn:
         log_fn(f"在 {cuda_tag} 通道找不到適用輪檔")
