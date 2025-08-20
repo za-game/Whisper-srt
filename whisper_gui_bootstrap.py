@@ -73,6 +73,7 @@ CACHE_PATH.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(CACHE_PATH))
 os.environ.setdefault("HF_HOME", str(CACHE_PATH))
 MIN_TORCH = version.parse("2.6")
+TORCH_PROBE_SERIES = ["", "~=2.8", "~=2.7", "~=2.6"]
 
 def _torch_version():
     try:
@@ -151,35 +152,68 @@ def _candidate_cuda_tags(cuda_version: str | None) -> list[str]:
     return tags
 
 
-def _probe_torch(cuda_tag: str) -> str | None:
-    index = f"https://download.pytorch.org/whl/{'cpu' if cuda_tag == 'cpu' else cuda_tag}"
-    with tempfile.TemporaryDirectory() as tmp:
-        try:
-            run_pip(["download", "--no-deps", "-d", tmp, "torch", "--index-url", index])
-        except subprocess.CalledProcessError:
-            return None
-        wheels = list(Path(tmp).glob("torch-*.whl"))
-        if not wheels:
-            return None
-        m = re.search(r"torch-([\d\.]+)", wheels[0].name)
-        return m.group(1) if m else None
+def _probe_torch_with_backoff(cuda_tag: str) -> tuple[str | None, str | None]:
+    index_url = f"https://download.pytorch.org/whl/{'cpu' if cuda_tag == 'cpu' else cuda_tag}"
+    py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    if sys.platform.startswith("win"):
+        plat_tags = ["win_amd64"]
+    else:
+        plat_tags = ["manylinux", "linux_x86_64"]
+    for spec in TORCH_PROBE_SERIES:
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                run_pip(
+                    [
+                        "download",
+                        "--no-deps",
+                        "--index-url",
+                        index_url,
+                        f"torch{spec}",
+                        "-q",
+                        "-d",
+                        tmp,
+                    ]
+                )
+            except subprocess.CalledProcessError:
+                continue
+            wheels = list(Path(tmp).glob("torch-*.whl"))
+            if not wheels:
+                continue
+            name = wheels[0].name
+            if py_tag not in name:
+                continue
+            if not any(tag in name for tag in plat_tags):
+                continue
+            m = re.search(r"torch-([\d\.]+)", name)
+            if not m:
+                continue
+            ver = version.parse(m.group(1))
+            if ver < MIN_TORCH:
+                continue
+            return str(ver), index_url
+    return None, None
 
 
 def recommend_cuda_version(cuda_version: str | None):
     for tag in _candidate_cuda_tags(cuda_version):
-        ver = _probe_torch(tag)
+        if tag == "cpu":
+            continue
+        ver, index_url = _probe_torch_with_backoff(tag)
         if ver:
-            return tag, ver
-    return "cpu", None
+            return tag, ver, index_url
+    ver, index_url = _probe_torch_with_backoff("cpu")
+    cpu_index = "https://download.pytorch.org/whl/cpu"
+    if ver:
+        return "cpu", ver, index_url
+    return "cpu", None, cpu_index
 
 
 def _gather_env() -> dict:
     gpu_name, driver_ver, cuda_ver = detect_gpu()
-    rec_tag, _ = (
-        recommend_cuda_version(cuda_ver)
-        if cuda_ver
-        else ("cpu", _probe_torch("cpu"))
-    )
+    if cuda_ver:
+        rec_tag, _, _ = recommend_cuda_version(cuda_ver)
+    else:
+        rec_tag = "cpu"
     torch_ver = _torch_version()
     torch_ok = torch_ver is not None and is_installed("faster_whisper")
     installed_tag = None
@@ -247,9 +281,9 @@ def run_pip(args, log_fn=None, cancel_flag=None):
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd)
 
-def install_deps(cuda_tag, torch_ver=None, log_fn=None, cancel_flag=None):
+def install_deps(cuda_tag, torch_ver=None, index_url=None, log_fn=None, cancel_flag=None):
     torch_pkg = f"torch=={torch_ver}" if torch_ver else "torch"
-    index = f"https://download.pytorch.org/whl/{'cpu' if cuda_tag == 'cpu' else cuda_tag}"
+    index = index_url or f"https://download.pytorch.org/whl/{'cpu' if cuda_tag == 'cpu' else cuda_tag}"
     run_pip(
         ["uninstall", "-y", "torch", "torchvision", "torchaudio"],
         log_fn=log_fn,
@@ -1364,25 +1398,32 @@ class BootstrapWin(QtWidgets.QMainWindow):
     def install_torch_cuda(self):
         try:
             gpu_name, driver_ver, cuda_ver = detect_gpu()
-            cuda_tag, torch_ver = (
-                recommend_cuda_version(cuda_ver) if gpu_name and cuda_ver else ("cpu", _probe_torch("cpu"))
-            )
+            if gpu_name and cuda_ver:
+                cuda_tag, torch_ver, index_url = recommend_cuda_version(cuda_ver)
+            else:
+                torch_ver, index_url = _probe_torch_with_backoff("cpu")
+                if index_url is None:
+                    index_url = "https://download.pytorch.org/whl/cpu"
+                cuda_tag = "cpu"
             self.cuda_tag = cuda_tag
             info = torch_ver or "latest"
             self.append_log(
-                f"安裝 torch/CUDA… GPU: {gpu_name or '無'} | CUDA: {cuda_tag} | torch: {info}"
+                f"安裝 torch/CUDA… GPU: {gpu_name or '無'} | 通道: {cuda_tag} | torch: {info}"
             )
             self._run_with_progress(
                 "安裝 torch/CUDA",
                 lambda is_cancelled: install_deps(
                     cuda_tag,
                     torch_ver=torch_ver,
+                    index_url=index_url,
                     log_fn=self.append_log,
                     cancel_flag=is_cancelled,
                 ),
                 label="安裝中…",
             )
             self.append_log("安裝完成")
+            if cuda_tag == "cpu" and gpu_name:
+                self.append_log("警告: 你的 Python 版本可能是奇數版（例如 3.11/3.13）而 CUDA wheels 尚未釋出，建議改用 Python 3.12 或等待對應輪檔上線")
         except Exception as e:
             self.append_log(f"安裝失敗: {e}")
         self.check_env()
