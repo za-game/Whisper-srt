@@ -30,6 +30,7 @@ import sys
 import base64
 import shutil
 import importlib.util
+from importlib import metadata
 from pathlib import Path
 from PyQt5 import QtCore, QtWidgets, QtGui
 from project_io import save_project, load_project
@@ -71,10 +72,12 @@ CACHE_PATH.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(CACHE_PATH))
 os.environ.setdefault("HF_HOME", str(CACHE_PATH))
 MIN_TORCH = version.parse("2.6")
+
 def _torch_version():
     try:
-        import torch  # type: ignore
-        return version.parse(torch.__version__.split("+")[0])
+        sys.modules.pop("torch", None)
+        ver = metadata.version("torch")
+        return version.parse(ver.split("+")[0])
     except Exception:
         return None
 MODEL_REPO_MAP = CONFIG["MODEL_REPO_MAP"]
