@@ -45,6 +45,13 @@ import webrtcvad
 from faster_whisper import WhisperModel
 from transformers import pipeline
 from huggingface_hub import login as hf_login
+try:
+    import torch
+except Exception as e:  # pragma: no cover - informative error
+    raise RuntimeError(
+        "PyTorch 2.6 or newer is required; please install an appropriate version"
+    ) from e
+from packaging import version
 
 # ─────────────────────────────────────────────────────────────
 # 2. Global State & Constants (mutable ones are initialised later)
@@ -69,9 +76,14 @@ CONF_THR_STEP = 0.02
 # 讀取共用設定
 ROOT_DIR = Path(__file__).resolve().parent
 CONFIG = json.loads((ROOT_DIR / "Config.json").read_text(encoding="utf-8"))
-MODEL_PATH = ROOT_DIR / CONFIG.get("model_path", "hf_models")
+MODEL_PATH = ROOT_DIR / CONFIG.get("model_path", "models")
 MODEL_PATH.mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("HF_HOME", str(MODEL_PATH))
+DEFAULT_CACHE = str(Path.home() / ".cache" / "huggingface" / "hub")
+CACHE_PATH = Path(CONFIG.get("cache_path", DEFAULT_CACHE)).expanduser()
+CACHE_PATH.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(CACHE_PATH))
+os.environ.setdefault("HF_HOME", str(CACHE_PATH))
+MIN_TORCH = version.parse("2.6")
 _REPO_MAP = CONFIG["MODEL_REPO_MAP"]
 TRANSLATE_MODEL_MAP = {
     tuple(k.split("-")): v for k, v in CONFIG["TRANSLATE_REPO_MAP"].items()
@@ -349,6 +361,15 @@ def _load_translate_pipe(src: str, tgt: str):
         model = TRANSLATE_MODEL_MAP.get(pair)
         if model is None:
             return None
+        if model.startswith("facebook/") and version.parse(torch.__version__.split("+")[0]) < MIN_TORCH:
+            log.warning(
+                "translation model %s requires PyTorch %s+; found %s",
+                model,
+                MIN_TORCH,
+                torch.__version__,
+            )
+            _translate_pipes[pair] = None
+            return None
         kwargs = {}
         if model.startswith("facebook/m2m100"):
             kwargs["src_lang"] = src
@@ -357,9 +378,12 @@ def _load_translate_pipe(src: str, tgt: str):
             nllb = {"ja": "jpn_Jpan", "ko": "kor_Hang", "zh": "zho_Hans"}
             kwargs["src_lang"] = nllb[src]
             kwargs["tgt_lang"] = nllb[tgt]
+        local = MODEL_PATH / model.replace("/", "--")
+        if local.is_dir():
+            model = str(local)
         while True:
             try:
-                pipe = pipeline("translation", model=model, cache_dir=str(MODEL_PATH), **kwargs)
+                pipe = pipeline("translation", model=model, cache_dir=str(CACHE_PATH), **kwargs)
                 break
             except Exception as exc:  # pragma: no cover - runtime dependency
                 err = str(exc)

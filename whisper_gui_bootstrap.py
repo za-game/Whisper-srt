@@ -5,7 +5,7 @@ Whisper Live Caption – EXE 發佈專用啟動器
 ========================================
 功能：
 1. 啟動時偵測 GPU 與驅動版本
-2. 推算最適 CUDA runtime (cu123 / cu121 / cu118 / cpu)
+2. 推算最適 CUDA runtime (自動選擇最新 cuXX 或 cpu)
 3. 檢查必要套件 (torch, faster-whisper, PyQt5 等)
 4. 缺少時 GUI 詢問並安裝
 5. 完成後啟動 mWhisperSub.py，並在本程式內建字幕 Overlay + 系統匣設定
@@ -30,6 +30,7 @@ import sys
 import base64
 import shutil
 import importlib.util
+from importlib import metadata
 from pathlib import Path
 from PyQt5 import QtCore, QtWidgets, QtGui
 from project_io import save_project, load_project
@@ -47,12 +48,16 @@ else:  # Fallback for builds without qRegisterMetaType
         pass
 
 import os
-import urllib.request
+import re
+import tempfile
+import urllib.request, urllib.parse
 import sounddevice as sd
 import signal
 import threading
+import time
 import tqdm
 import numpy as np
+from packaging import version
 from overlay import Settings, SubtitleOverlay, Tray
 from srt_utils import LiveSRTWatcher
 ROOT_DIR = Path(__file__).resolve().parent
@@ -61,9 +66,23 @@ OVERLAY_PY = ROOT_DIR / "srt_overlay_tool.py"
 
 with (ROOT_DIR / "Config.json").open(encoding="utf-8") as f:
     CONFIG = json.load(f)
-MODEL_PATH = (ROOT_DIR / CONFIG.get("model_path", "hf_models")).resolve()
+MODEL_PATH = (ROOT_DIR / CONFIG.get("model_path", "models")).resolve()
 MODEL_PATH.mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("HF_HOME", str(MODEL_PATH))
+CACHE_DEFAULT = str(Path.home() / ".cache" / "huggingface" / "hub")
+CACHE_PATH = Path(CONFIG.get("cache_path", CACHE_DEFAULT)).expanduser().resolve()
+CACHE_PATH.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(CACHE_PATH))
+os.environ.setdefault("HF_HOME", str(CACHE_PATH))
+MIN_TORCH = version.parse("2.6")
+TORCH_PROBE_SERIES = ["", "~=2.8", "~=2.7", "~=2.6"]
+
+def _torch_version():
+    try:
+        sys.modules.pop("torch", None)
+        ver = metadata.version("torch")
+        return version.parse(ver.split("+")[0])
+    except Exception:
+        return None
 MODEL_REPO_MAP = CONFIG["MODEL_REPO_MAP"]
 TRANSLATE_REPO_MAP = {
     tuple(k.split("-")): v for k, v in CONFIG["TRANSLATE_REPO_MAP"].items()
@@ -84,16 +103,20 @@ def list_audio_devices():
 # ──────────── GPU 偵測 ────────────
 def detect_gpu():
     if not shutil.which("nvidia-smi"):
-        return None, None
+        return None, None, None
     try:
         out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
-            encoding="utf-8"
+            [
+                "nvidia-smi",
+                "--query-gpu=name,driver_version,cuda_version",
+                "--format=csv,noheader",
+            ],
+            encoding="utf-8",
         ).strip().split("\n")[0]
-        name, driver = [x.strip() for x in out.split(",")]
-        return name, driver
+        name, driver, cuda = [x.strip() for x in out.split(",")]
+        return name, driver, cuda
     except Exception:
-        return None, None
+        return None, None, None
 
 def list_gpus():
     if not shutil.which("nvidia-smi"):
@@ -107,34 +130,136 @@ def list_gpus():
     except Exception:
         return []
 
-def recommend_cuda_version(driver_version):
-    try:
-        major = int(driver_version.split(".")[0])
-        if major >= 535:
-            primary = "cu123"
-        elif major >= 525:
-            primary = "cu121"
-        else:
-            primary = "cu118"
-    except:
-        return "cpu"
 
-    # 驗證該 CUDA wheel 是否存在，否則降級
-    if torch_wheel_exists(primary):
-        return primary
-    for fallback in ["cu121", "cu118", "cpu"]:
-        if torch_wheel_exists(fallback):
-            return fallback
-    return "cpu"
-
-# ──────────── 套件檢查 ────────────
-def torch_wheel_exists(cuda_tag):
+def _parse_cuda(cuda_version: str | None) -> int:
+    if not cuda_version:
+        return 0
     try:
-        url = f"https://download.pytorch.org/whl/{cuda_tag}/torch/"
-        with urllib.request.urlopen(url) as resp:
-            return resp.status == 200
-    except:
-        return False
+        return int(float(cuda_version) * 10)
+    except Exception:
+        return 0
+
+
+def _candidate_cuda_tags(cuda_version: str | None) -> list[str]:
+    max_cuda = _parse_cuda(cuda_version)
+    if not max_cuda:
+        return ["cpu"]
+    nums = list(range(max_cuda, 123, -2))
+    for n in (126, 124):
+        if n <= max_cuda and n not in nums:
+            nums.append(n)
+    tags = [f"cu{n}" for n in sorted(set(nums), reverse=True)]
+    tags.append("cpu")
+    return tags
+
+
+def _probe_torch_with_backoff(
+    cuda_tag: str, log_fn=None
+) -> tuple[str | None, str | None]:
+    index_url = f"https://download.pytorch.org/whl/{'cpu' if cuda_tag == 'cpu' else cuda_tag}"
+    py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    if sys.platform.startswith("win"):
+        plat_tags = ["win_amd64"]
+    else:
+        plat_tags = ["manylinux", "linux_x86_64"]
+    for spec in TORCH_PROBE_SERIES:
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                run_pip(
+                    [
+                        "download",
+                        "--no-deps",
+                        "--index-url",
+                        index_url,
+                        f"torch{spec}",
+                        "-q",
+                        "-d",
+                        tmp,
+                    ],
+                    log_fn=log_fn,
+                )
+            except subprocess.CalledProcessError:
+                continue
+            wheels = list(Path(tmp).glob("torch-*.whl"))
+            if not wheels:
+                continue
+            name = wheels[0].name
+            if py_tag not in name:
+                continue
+            if not any(tag in name for tag in plat_tags):
+                continue
+            m = re.search(r"torch-([\d\.]+)", name)
+            if not m:
+                continue
+            ver = version.parse(m.group(1))
+            if ver < MIN_TORCH:
+                continue
+            return str(ver), index_url
+    return None, None
+
+
+def recommend_cuda_version(cuda_version: str | None, log_fn=None):
+    for tag in _candidate_cuda_tags(cuda_version):
+        if tag == "cpu":
+            continue
+        ver, index_url = _probe_torch_with_backoff(tag, log_fn=log_fn)
+        if ver:
+            return tag, ver, index_url
+    ver, index_url = _probe_torch_with_backoff("cpu", log_fn=log_fn)
+    cpu_index = "https://download.pytorch.org/whl/cpu"
+    if ver:
+        return "cpu", ver, index_url
+    return "cpu", None, cpu_index
+
+
+def _gather_env() -> dict:
+    gpu_name, driver_ver, cuda_ver = detect_gpu()
+    if cuda_ver:
+        rec_tag, _, _ = recommend_cuda_version(cuda_ver)
+    else:
+        rec_tag = "cpu"
+    torch_ver = _torch_version()
+    torch_ok = torch_ver is not None and is_installed("faster_whisper")
+    installed_tag = None
+    cuda_tag = rec_tag
+    if torch_ver:
+        try:
+            import torch  # type: ignore
+
+            state = torch.__version__
+            if torch.cuda.is_available() and torch.version.cuda:
+                installed_tag = f"cu{torch.version.cuda.replace('.', '')}"
+                cuda_tag = installed_tag
+                if not gpu_name:
+                    gpu_name = torch.cuda.get_device_name(0)
+            else:
+                cuda_tag = rec_tag
+        except Exception:
+            state = str(torch_ver)
+            cuda_tag = rec_tag
+        if torch_ver < MIN_TORCH:
+            state += f" (需升級至 {MIN_TORCH})"
+    else:
+        state = "未安裝"
+    return {
+        "gpu_name": gpu_name,
+        "driver_ver": driver_ver,
+        "rec_tag": rec_tag,
+        "torch_ver": torch_ver,
+        "torch_ok": torch_ok,
+        "installed_tag": installed_tag,
+        "state": state,
+        "cuda_tag": cuda_tag,
+    }
+
+
+class EnvWorker(QtCore.QThread):
+    result = QtCore.pyqtSignal(dict)
+
+    def run(self) -> None:  # type: ignore[override]
+        info = _gather_env()
+        self.result.emit(info)
+
 def is_installed(pkg):
     return importlib.util.find_spec(pkg) is not None
 
@@ -142,7 +267,13 @@ def run_pip(args, log_fn=None, cancel_flag=None):
     cmd = [sys.executable, "-m", "pip"] + args
     if log_fn:
         log_fn(f"執行: {' '.join(cmd)}")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -160,30 +291,22 @@ def run_pip(args, log_fn=None, cancel_flag=None):
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd)
 
-def install_deps(cuda_tag, log_fn=None, cancel_flag=None):
-    pkgs = []
-    if cuda_tag.startswith("cu"):
-        # 安裝 PyTorch GPU 版
-        pkgs += [
-            "torch", "torchvision", "torchaudio",
-            "--index-url", f"https://download.pytorch.org/whl/{cuda_tag}"
-        ]
-        run_pip(["install", "--upgrade"] + pkgs, log_fn=log_fn, cancel_flag=cancel_flag)
-    else:
-        # CPU 版 PyTorch
-        run_pip(
-            [
-                "install",
-                "--upgrade",
-                "torch",
-                "torchvision",
-                "torchaudio",
-                "--index-url",
-                "https://download.pytorch.org/whl/cpu",
-            ],
-            log_fn=log_fn,
-            cancel_flag=cancel_flag,
-        )
+def install_deps(cuda_tag, torch_ver=None, index_url=None, log_fn=None, cancel_flag=None):
+    torch_pkg = f"torch=={torch_ver}" if torch_ver else "torch"
+    index = index_url or f"https://download.pytorch.org/whl/{'cpu' if cuda_tag == 'cpu' else cuda_tag}"
+    run_pip(
+        ["uninstall", "-y", "torch", "torchvision", "torchaudio"],
+        log_fn=log_fn,
+        cancel_flag=cancel_flag,
+    )
+    pkgs = [
+        torch_pkg,
+        "torchvision",
+        "torchaudio",
+        "--index-url",
+        index,
+    ]
+    run_pip(["install", "--upgrade"] + pkgs, log_fn=log_fn, cancel_flag=cancel_flag)
     # faster-whisper 與 PyQt5
     run_pip(
         [
@@ -239,6 +362,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.translate_lang_combo.setEnabled(False)
         self.translate_chk.toggled.connect(self.translate_lang_combo.setEnabled)
         self.lang_combo.currentTextChanged.connect(self._update_translate_lang_options)
+        self.translate_lang_combo.currentIndexChanged.connect(self._on_translate_lang_changed)
         self._update_translate_lang_options()
         # 翻譯語言僅在勾選翻譯時生效
         form_layout.addRow(self.translate_chk, self.translate_lang_combo)
@@ -470,44 +594,132 @@ class BootstrapWin(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self._auto_open_last_project)
         # —— 統一的本地模型資料夾：model_path/<Repo> —— #
     def _repo_local_dir(self, repo_id: str) -> Path:
-        d = (MODEL_PATH / repo_id.replace("/", "--"))
-        try:
-            d.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-        return d
+        return MODEL_PATH / repo_id.replace("/", "--")
+
+    def _cached_model_dir(self, repo_id: str) -> Path | None:
+        snap_root = CACHE_PATH / f"models--{repo_id.replace('/', '--')}" / "snapshots"
+        if snap_root.exists():
+            for p in snap_root.iterdir():
+                if any(p.iterdir()):
+                    return p
+        return None
 
     def _update_translate_lang_options(self):
         opts = ["JA", "EN", "KO", "ZH"]
         src = self.lang_combo.currentText().upper()
         if src in opts:
             opts.remove(src)
+        self.translate_lang_combo.blockSignals(True)
         self.translate_lang_combo.clear()
-        self.translate_lang_combo.addItems(opts)
-        if "EN" in opts:
-            self.translate_lang_combo.setCurrentText("EN")
-        elif opts:
-            self.translate_lang_combo.setCurrentIndex(0)
+        model = self.translate_lang_combo.model()
+        available_items: list[tuple[int, str]] = []
+        torch_ver = _torch_version()
+        for i, code in enumerate(opts):
+            tgt = code.lower()
+            available = True
+            suffix = ""
+            if src.lower() == "auto":
+                repos = [v for (s, t), v in TRANSLATE_REPO_MAP.items() if t == tgt]
+                need_upgrade = any(
+                    repo.startswith("facebook/") and (not torch_ver or torch_ver < MIN_TORCH)
+                    for repo in repos
+                )
+                downloaded = all(self._translate_model_downloaded(repo) for repo in repos)
+                if need_upgrade:
+                    available = False
+                    suffix = " (請升級Torch)"
+                elif not downloaded:
+                    available = False
+                    suffix = " (未下載)"
+            else:
+                repo = TRANSLATE_REPO_MAP.get((src.lower(), tgt))
+                if repo:
+                    need_upgrade = repo.startswith("facebook/") and (
+                        not torch_ver or torch_ver < MIN_TORCH
+                    )
+                    downloaded = self._translate_model_downloaded(repo)
+                    if need_upgrade:
+                        available = False
+                        suffix = " (請升級Torch)"
+                    elif not downloaded:
+                        available = False
+                        suffix = " (未下載)"
+            text = f"{code}{suffix}"
+            self.translate_lang_combo.addItem(text, code)
+            brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
+            model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
+            if available:
+                available_items.append((i, code))
+        placeholder_idx = self.translate_lang_combo.findData("")
+        if available_items:
+            if placeholder_idx != -1:
+                self.translate_lang_combo.removeItem(placeholder_idx)
+            target = next((i for i, c in available_items if c == "EN"), available_items[0][0])
+            self.translate_lang_combo.setCurrentIndex(target)
+        else:
+            if placeholder_idx == -1:
+                self.translate_lang_combo.insertItem(0, "未選擇", "")
+                placeholder_idx = 0
+            self.translate_lang_combo.setCurrentIndex(placeholder_idx)
+        self.translate_lang_combo.blockSignals(False)
+        self._last_trans_index = self.translate_lang_combo.currentIndex()
 
     def _model_downloaded(self, name: str) -> bool:
-        local_dir = ROOT_DIR / "models" / name
         repo = MODEL_REPO_MAP.get(name, name)
-        hf_dir = MODEL_PATH / repo.replace("/", "--")
-        if local_dir.exists() and any(local_dir.iterdir()):
+        if self._cached_model_dir(repo):
             return True
-        if hf_dir.exists() and any(hf_dir.iterdir()):
+        paths = [
+            MODEL_PATH / name,
+            MODEL_PATH / repo.replace("/", "--"),
+        ]
+        for p in paths:
+            if p.exists() and any(p.iterdir()):
+                return True
+        return False
+
+    def _translate_model_downloaded(self, repo: str) -> bool:
+        if self._cached_model_dir(repo):
             return True
+        paths = [
+            MODEL_PATH / repo,
+            MODEL_PATH / repo.replace("/", "--"),
+        ]
+        for p in paths:
+            if p.exists() and any(p.iterdir()):
+                return True
         return False
 
     def _refresh_model_items(self):
-        model = self.model_combo.model()
-        for i in range(self.model_combo.count()):
-            base = self.model_combo.itemData(i)
-            available = self._model_downloaded(base)
-            text = base if available else f"{base} (未下載)"
-            self.model_combo.setItemText(i, text)
-            brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
-            model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
+        self.model_combo.blockSignals(True)
+        try:
+            model = self.model_combo.model()
+            available_names: list[str] = []
+            for i in range(self.model_combo.count()):
+                base = self.model_combo.itemData(i)
+                if not base:
+                    continue
+                available = self._model_downloaded(base)
+                text = base if available else f"{base} (未下載)"
+                self.model_combo.setItemText(i, text)
+                brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
+                model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
+                if available:
+                    available_names.append(base)
+            placeholder_idx = self.model_combo.findData("")
+            if available_names:
+                if placeholder_idx != -1:
+                    self.model_combo.removeItem(placeholder_idx)
+                current_name = self.model_combo.currentData()
+                if not current_name or not self._model_downloaded(current_name):
+                    self.model_combo.setCurrentIndex(self.model_combo.findData(available_names[0]))
+            else:
+                if placeholder_idx == -1:
+                    self.model_combo.insertItem(0, "未選擇", "")
+                    placeholder_idx = 0
+                self.model_combo.setCurrentIndex(placeholder_idx)
+        finally:
+            self.model_combo.blockSignals(False)
+        self._last_model_index = self.model_combo.currentIndex()
 
     def _set_model_name(self, name: str):
         for i in range(self.model_combo.count()):
@@ -520,6 +732,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
     def _on_model_changed(self, idx: int):
         base = self.model_combo.itemData(idx)
+        if not base:
+            self._last_model_index = idx
+            return
         if not self._model_downloaded(base):
             resp = QtWidgets.QMessageBox.question(
                 self,
@@ -541,6 +756,82 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 return
         self._last_model_index = self.model_combo.currentIndex()
         self.schedule_autosave(300)
+
+    def _on_translate_lang_changed(self, idx: int):
+        tgt = self.translate_lang_combo.itemData(idx)
+        if not tgt:
+            self._last_trans_index = idx
+            return
+        src = self.lang_combo.currentText().lower()
+        torch_ver = _torch_version()
+        if src == "auto":
+            repos = [v for (s, t), v in TRANSLATE_REPO_MAP.items() if t == tgt.lower()]
+            need_upgrade = any(
+                repo.startswith("facebook/") and (not torch_ver or torch_ver < MIN_TORCH)
+                for repo in repos
+            )
+            if need_upgrade:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "版本過低",
+                    f"翻譯模型 {', '.join(repos)} 需要 PyTorch {MIN_TORCH}+，請升級 Torch",
+                )
+                self.translate_lang_combo.blockSignals(True)
+                self.translate_lang_combo.setCurrentIndex(self._last_trans_index)
+                self.translate_lang_combo.blockSignals(False)
+                return
+            missing = [repo for repo in repos if not self._translate_model_downloaded(repo)]
+            if missing:
+                resp = QtWidgets.QMessageBox.question(
+                    self,
+                    "下載模型",
+                    "下列翻譯模型未下載，現在下載嗎？\n" + "\n".join(missing),
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                )
+                if resp == QtWidgets.QMessageBox.Yes:
+                    for repo in missing:
+                        try:
+                            self._download_model_with_progress(repo)
+                        except Exception as e:
+                            QtWidgets.QMessageBox.warning(self, "下載失敗", str(e))
+                    self._update_translate_lang_options()
+                else:
+                    self.translate_lang_combo.blockSignals(True)
+                    self.translate_lang_combo.setCurrentIndex(self._last_trans_index)
+                    self.translate_lang_combo.blockSignals(False)
+                    return
+        else:
+            repo = TRANSLATE_REPO_MAP.get((src, tgt.lower()))
+            if repo:
+                if repo.startswith("facebook/") and (not torch_ver or torch_ver < MIN_TORCH):
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "版本過低",
+                        f"翻譯模型 {repo} 需要 PyTorch {MIN_TORCH}+，請升級 Torch",
+                    )
+                    self.translate_lang_combo.blockSignals(True)
+                    self.translate_lang_combo.setCurrentIndex(self._last_trans_index)
+                    self.translate_lang_combo.blockSignals(False)
+                    return
+                if not self._translate_model_downloaded(repo):
+                    resp = QtWidgets.QMessageBox.question(
+                        self,
+                        "下載模型",
+                        f"翻譯模型 {repo} 未下載，現在下載嗎？",
+                        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    )
+                    if resp == QtWidgets.QMessageBox.Yes:
+                        try:
+                            self._download_model_with_progress(repo)
+                        except Exception as e:
+                            QtWidgets.QMessageBox.warning(self, "下載失敗", str(e))
+                        self._update_translate_lang_options()
+                    else:
+                        self.translate_lang_combo.blockSignals(True)
+                        self.translate_lang_combo.setCurrentIndex(self._last_trans_index)
+                        self.translate_lang_combo.blockSignals(False)
+                        return
+        self._last_trans_index = idx
     def closeEvent(self, ev: QtGui.QCloseEvent):
         ev.ignore()
         self.hide()
@@ -776,7 +1067,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 self.hot_proj_name_edit.setText(Path(path).parent.name)
             except Exception:
                 pass
-            self.append_log(f"已選擇熱詞檔：{path}")
+            self._ui_log(f"已選擇熱詞檔：{path}")
 
     def pick_srt_file(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -800,7 +1091,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             )
             if self.overlay:
                 self.srt_watcher.updated.connect(self.overlay.show_entry_text)
-            self.append_log(f"已選擇 SRT：{path}")
+            self._ui_log(f"已選擇 SRT：{path}")
 
     def edit_srt_file(self):
         p = self.srt_edit.text().strip()
@@ -811,7 +1102,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         except AttributeError:
             QtWidgets.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(p))
         except Exception as e:
-            self.append_log(f"開啟 SRT 失敗：{e}")
+            self._ui_log(f"開啟 SRT 失敗：{e}")
 
     def edit_hotwords_file(self):
         p = self.hotwords_edit.text().strip()
@@ -827,7 +1118,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             try:
                 Path(path).touch(exist_ok=True)
             except Exception as e:
-                self.append_log(f"建立熱詞檔失敗：{e}")
+                self._ui_log(f"建立熱詞檔失敗：{e}")
                 return
             self.hotwords_edit.setText(path)
             p = path
@@ -838,7 +1129,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             # 其他平台退而求其次
             QtWidgets.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(p))
         except Exception as e:
-            self.append_log(f"開啟熱詞檔失敗：{e}")
+            self._ui_log(f"開啟熱詞檔失敗：{e}")
 
     def refresh_audio_devices(self):
         self.audio_device_combo.clear()
@@ -849,7 +1140,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         dev_data = self.audio_device_combo.currentData()
         dev_id, sr = dev_data if dev_data is not None else (-1, 16000)
         duration = 15
-        self.append_log("偵測噪音等級中…")
+        self._ui_log("偵測噪音等級中…")
         try:
             audio = sd.rec(
                 int(duration * sr), samplerate=sr, channels=1, dtype="float32", device=dev_id
@@ -866,9 +1157,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
             else:
                 level = 3
             self.vad_combo.setCurrentText(str(level))
-            self.append_log(f"背景噪音 {noise_db:.1f} dB → 選擇 VAD {level}")
+            self._ui_log(f"背景噪音 {noise_db:.1f} dB → 選擇 VAD {level}")
         except Exception as e:
-            self.append_log(f"偵測失敗：{e}")
+            self._ui_log(f"偵測失敗：{e}")
 
     def _poll_mic_level(self):
         if self.proc and self.proc.poll() is None:
@@ -951,7 +1242,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             # SRT 先建空檔，讓 watcher 有檔可監看
             srt_path.touch(exist_ok=False)
         except Exception as e:
-            self.append_log(f"建立專案失敗：{e}")
+            self._ui_log(f"建立專案失敗：{e}")
             return
         self.project_name_edit.setText(proj_name)
         self.project_path_edit.setText(str(proj_dir))
@@ -962,9 +1253,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.hotwords_edit.setText(str(hot_path))
         self.srt_edit.setText(str(srt_path))
         self.settings.update(srt_path=srt_path)
-        self.append_log(f"已建立專案：{proj_dir}")
-        self.append_log(f"Hotwords：{hot_path}")
-        self.append_log(f"SRT：{srt_path}")
+        self._ui_log(f"已建立專案：{proj_dir}")
+        self._ui_log(f"Hotwords：{hot_path}")
+        self._ui_log(f"SRT：{srt_path}")
         # 5) 讓現有 watcher 轉向新的 srt 路徑
         if self.srt_watcher:
             try:
@@ -1009,30 +1300,58 @@ class BootstrapWin(QtWidgets.QMainWindow):
         if self.overlay:
             self.overlay.installEventFilter(self)
         if not self.hotwords_edit.text().strip() and not self.srt_edit.text().strip():
-            self.append_log("此資料夾內未找到 .txt 或 .srt，請手動選擇。")
+            self._ui_log("此資料夾內未找到 .txt 或 .srt，請手動選擇。")
     def check_env(self):
-        gpu_name, driver_ver = detect_gpu()
+        if getattr(self, "_env_worker", None) and self._env_worker.isRunning():
+            return
         self.refresh_gpu_list()
-        if gpu_name:
-            cuda_tag = recommend_cuda_version(driver_ver)
-            self.cuda_tag = cuda_tag
-            self.gpu_label.setText(f"GPU: {gpu_name}")
-            self.driver_label.setText(f"驅動版本: {driver_ver}")
-            self.append_log(f"偵測到 GPU: {gpu_name} | 驅動: {driver_ver} | 推薦 CUDA: {cuda_tag}")
-        else:
-            self.cuda_tag = "cpu"
+        self.pkg_label.setText("torch/CUDA: 檢查中…")
+        self.gpu_label.setText("GPU: 檢查中…")
+        self.driver_label.setText("驅動版本: 檢查中…")
+        self._ui_log("檢查環境中…")
+        self._env_worker = EnvWorker()
+        self._env_worker.result.connect(self._apply_env)
+        self._env_worker.finished.connect(lambda: setattr(self, "_env_worker", None))
+        self._env_worker.start()
+
+    @QtCore.pyqtSlot(dict)
+    def _apply_env(self, info: dict):
+        gpu_name = info["gpu_name"]
+        driver_ver = info["driver_ver"]
+        rec_tag = info["rec_tag"]
+        torch_ver = info["torch_ver"]
+        torch_ok = info["torch_ok"]
+        installed_tag = info["installed_tag"]
+        state = info["state"]
+        self.cuda_tag = info["cuda_tag"]
+
+        if not gpu_name:
             self.gpu_label.setText("GPU: 無")
             self.driver_label.setText("驅動版本: 無")
-            self.append_log("未偵測到 NVIDIA GPU，將使用 CPU 模式")
-
-        torch_ok = is_installed("torch") and is_installed("faster_whisper")
-        state = "已安裝" if torch_ok else "未安裝"
-        self.pkg_label.setText(f"torch/CUDA: {state} (推薦 {self.cuda_tag})")
-        self._update_cuda_option(torch_ok and self.cuda_tag != "cpu")
-        if torch_ok:
-            self.append_log("環境已安裝，可直接啟動。")
+            self._ui_log("未偵測到 NVIDIA GPU，將使用 CPU 模式")
         else:
-            self.append_log("需要安裝相應套件。")
+            self.gpu_label.setText(f"GPU: {gpu_name}")
+            self.driver_label.setText(f"驅動版本: {driver_ver}")
+            if self.cuda_tag == installed_tag:
+                self._ui_log(
+                    f"偵測到 GPU: {gpu_name} | 驅動: {driver_ver} | 已安裝 CUDA: {self.cuda_tag}"
+                )
+            else:
+                self._ui_log(
+                    f"偵測到 GPU: {gpu_name} | 驅動: {driver_ver} | 推薦 CUDA: {rec_tag}"
+                )
+
+        if rec_tag == "cpu" and installed_tag:
+            rec_tag = installed_tag
+        self.pkg_label.setText(f"torch/CUDA: {state} (推薦 {rec_tag})")
+        self._update_cuda_option(torch_ok and (installed_tag or rec_tag != "cpu"))
+        if torch_ok:
+            if torch_ver and torch_ver < MIN_TORCH:
+                self._ui_log(f"PyTorch 版本過低，翻譯模型需 {MIN_TORCH}+。")
+            else:
+                self._ui_log("環境已安裝，可直接啟動。")
+        else:
+            self._ui_log("需要安裝相應套件。")
 
     def _run_with_progress(self, title: str, task, label: str = "處理中…"):
         dlg = QtWidgets.QProgressDialog(label, "取消", 0, 0, self)
@@ -1045,7 +1364,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         dlg.show()
 
         cancelled = {"flag": False}
-        result = {"error": None}
+        result = {"error": None, "data": None}
 
         def on_cancel():
             cancelled["flag"] = True
@@ -1054,7 +1373,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         def worker():
             try:
-                task(lambda: cancelled["flag"])
+                result["data"] = task(lambda: cancelled["flag"])
             except Exception as e:
                 result["error"] = str(e)
             finally:
@@ -1064,43 +1383,67 @@ class BootstrapWin(QtWidgets.QMainWindow):
         t.start()
         while t.is_alive():
             QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 100)
+            time.sleep(0.05)
         if result["error"]:
             raise RuntimeError(result["error"])
         if cancelled["flag"]:
             raise RuntimeError("使用者取消")
+        return result["data"]
 
     def uninstall_torch_cuda(self):
         try:
-            self.append_log("解除安裝 torch/CUDA…")
+            self._ui_log("解除安裝 torch/CUDA…")
             self._run_with_progress(
                 "解除安裝 torch/CUDA",
                 lambda is_cancelled: run_pip(
                     ["uninstall", "-y", "torch", "torchvision", "torchaudio"],
-                    log_fn=self.append_log,
+                    log_fn=self._ui_log,
                     cancel_flag=is_cancelled,
                 ),
                 label="解除安裝中…",
             )
-            self.append_log("解除安裝完成")
+            self._ui_log("解除安裝完成")
         except Exception as e:
-            self.append_log(f"解除安裝失敗: {e}")
+            self._ui_log(f"解除安裝失敗: {e}")
         self.check_env()
 
     def install_torch_cuda(self):
         try:
-            self.append_log("安裝 torch/CUDA…")
-            self._run_with_progress(
-                "安裝 torch/CUDA",
-                lambda is_cancelled: install_deps(
-                    getattr(self, "cuda_tag", "cpu"),
-                    log_fn=self.append_log,
+            def task(is_cancelled):
+                gpu_name, driver_ver, cuda_ver = detect_gpu()
+                if gpu_name and cuda_ver:
+                    tag, ver, index = recommend_cuda_version(
+                        cuda_ver, log_fn=self._ui_log
+                    )
+                else:
+                    ver, index = _probe_torch_with_backoff("cpu", log_fn=self._ui_log)
+                    if index is None:
+                        index = "https://download.pytorch.org/whl/cpu"
+                    tag = "cpu"
+                self.cuda_tag = tag
+                info = ver or "latest"
+                self._ui_log(
+                    f"安裝 torch/CUDA… GPU: {gpu_name or '無'} | 通道: {tag} | torch: {info}"
+                )
+                install_deps(
+                    tag,
+                    torch_ver=ver,
+                    index_url=index,
+                    log_fn=self._ui_log,
                     cancel_flag=is_cancelled,
-                ),
-                label="安裝中…",
+                )
+                return {"cuda_tag": tag, "gpu_name": gpu_name}
+
+            result = self._run_with_progress(
+                "安裝 torch/CUDA", task, label="安裝中…"
             )
-            self.append_log("安裝完成")
+            self._ui_log("安裝完成")
+            if result and result["cuda_tag"] == "cpu" and result["gpu_name"]:
+                self._ui_log(
+                    "警告: 你的 Python 版本可能是奇數版（例如 3.11/3.13）而 CUDA wheels 尚未釋出，建議改用 Python 3.12 或等待對應輪檔上線"
+                )
         except Exception as e:
-            self.append_log(f"安裝失敗: {e}")
+            self._ui_log(f"安裝失敗: {e}")
         self.check_env()
 
     def _download_model_with_progress(self, repo_id: str):
@@ -1113,8 +1456,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             raise RuntimeError("缺少 huggingface_hub，請先完成套件安裝")
 
         # 顯示快取路徑（診斷用）
-        hf_cache = os.environ.get("HUGGINGFACE_HUB_CACHE") or os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
-        self.append_log(f"HuggingFace cache: {hf_cache}")
+        self._ui_log(f"HuggingFace cache: {CACHE_PATH}")
 
         # 進度對話框（byte 級）
         dlg = QtWidgets.QProgressDialog("準備下載…", "取消", 0, 100, self)
@@ -1186,14 +1528,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
             try:
                 # ✅ 不分平台：一律下載到專案內的 model_path/<Repo>
                 local_dir = self._repo_local_dir(repo_id)
-                QtCore.QMetaObject.invokeMethod(
-                    self, "append_log", QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(str, f"下載到本地模型資料夾：{local_dir}")
-                )
+                self._ui_log(f"下載到本地模型資料夾：{local_dir}")
                 snapshot_download(
                     repo_id=repo_id,
                     repo_type="model",
                     local_dir=str(local_dir),   # 新版 hub: 指定 local_dir 即為實體檔，無 symlink
+                    cache_dir=str(CACHE_PATH),
                     tqdm_class=QtTqdm,
                 )
             except RuntimeError as e:
@@ -1227,35 +1567,37 @@ class BootstrapWin(QtWidgets.QMainWindow):
         elif result["error"]:
             raise RuntimeError(result["error"])
         # 成功：把進度條補滿並提示完成
-        self.append_log("模型檢查/下載完成。")
+        self._ui_log("模型檢查/下載完成。")
 
     def start_clicked(self):
-        self.append_log("啟動中…")
+        self._ui_log("啟動中…")
         QtWidgets.QApplication.processEvents()
         # 顯示 Hugging Face 快取（診斷用）
-        hf_cache = os.environ.get("HUGGINGFACE_HUB_CACHE") or os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
-        self.append_log(f"HuggingFace cache: {hf_cache}")
+        self._ui_log(f"HuggingFace cache: {CACHE_PATH}")
         # 收集參數
         args = []
         # 模型：本地有就用路徑；沒有就用名稱交給 faster-whisper 下載
         model_name = self.model_combo.currentData()
-        # ① 先找你既有的 models/<name> 目錄
-        local_model_dir = (ROOT_DIR / "models" / model_name)
-        # ② 再找我們剛剛下載到的專案本地資料夾 model_path/<Repo>
         repo = MODEL_REPO_MAP.get(model_name, model_name)
-        local_hf_dir = self._repo_local_dir(repo)
-        if local_model_dir.exists():
-            use_dir = local_model_dir.resolve()
+        cache_dir = self._cached_model_dir(repo)
+        name_dir = MODEL_PATH / model_name
+        repo_dir = MODEL_PATH / repo.replace("/", "--")
+        if cache_dir:
+            use_dir = cache_dir.resolve()
             args += ["--model_dir", str(use_dir)]
-            self.append_log(f"使用本地模型：{use_dir}")
-        elif local_hf_dir.exists():
-            use_dir = local_hf_dir.resolve()
+            self._ui_log(f"使用本地模型：{use_dir}")
+        elif name_dir.exists() and any(name_dir.iterdir()):
+            use_dir = name_dir.resolve()
             args += ["--model_dir", str(use_dir)]
-            self.append_log(f"使用本地模型（專案目錄）：{use_dir}")
+            self._ui_log(f"使用本地模型：{use_dir}")
+        elif repo_dir.exists() and any(repo_dir.iterdir()):
+            use_dir = repo_dir.resolve()
+            args += ["--model_dir", str(use_dir)]
+            self._ui_log(f"使用本地模型：{use_dir}")
         else:
             # 無本地資料夾 → 交給 faster-whisper 以 Repo ID 取用（會走快取）
             args += ["--model_dir", repo]
-            self.append_log(f"使用 Hugging Face 模型：{repo}（若已在快取將直接重用）")
+            self._ui_log(f"使用 Hugging Face 模型：{repo}（若已在快取將直接重用）")
         # 語言（你預設要 zh；UI 選擇一律明確傳遞，避免分支縮排導致漏傳）
         args += ["--lang", self.lang_combo.currentText()]
         if self.translate_chk.isChecked():
@@ -1270,7 +1612,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         zh_mode = self.zh_combo.currentText().strip()
         if zh_mode:
             args += ["--zh", zh_mode]
-            self.append_log(f"OpenCC 模式：{zh_mode}")
+            self._ui_log(f"OpenCC 模式：{zh_mode}")
         # 熱詞檔
         hot_p = self.hotwords_edit.text().strip()
         if hot_p:
@@ -1309,7 +1651,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
             args += ["--temperature", temp_str]
         # 啟動 mWhisperSub（在 Windows 上讓它進入新的 process group，之後可用 CTRL_BREAK_EVENT 做優雅關閉）
         env = os.environ.copy()
-        env.setdefault("HF_HOME", str(MODEL_PATH))
         popen_kwargs = {"cwd": ROOT_DIR, "env": env}
         if os.name == "nt":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
@@ -1369,7 +1710,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     self.hot_proj_name_edit.setText(hot.parent.name)
                 except Exception:
                     pass
-                self.append_log(f"專案熱詞：{hot}")
+                self._ui_log(f"專案熱詞：{hot}")
         # SRT：若尚未載入，嘗試用資料夾最新 .srt；再不行就維持 QSettings 預設
         if not self.srt_edit.text().strip():
             srt = _latest("*.srt")
@@ -1390,7 +1731,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 )
                 if self.overlay:
                     self.srt_watcher.updated.connect(self.overlay.show_entry_text)
-                self.append_log(f"專案 SRT：{srt}")
+                self._ui_log(f"專案 SRT：{srt}")
         # 關鍵：不管 watcher 何時建立，都要**確保**把 updated 接到 overlay
         if self.srt_watcher and self.overlay:
             try:
@@ -1431,12 +1772,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
         return self.proc.poll() is not None
 
     def stop_clicked(self):
-        self.append_log("正在停止轉寫…")
+        self._ui_log("正在停止轉寫…")
         ok = self._graceful_terminate_proc()
         if ok:
-            self.append_log("轉寫已停止。")
+            self._ui_log("轉寫已停止。")
         else:
-            self.append_log("轉寫停止逾時，已強制結束。")
+            self._ui_log("轉寫停止逾時，已強制結束。")
         self.proc = None
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
@@ -1452,6 +1793,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
         if self.overlay:
             self.overlay.close()
         QtWidgets.QApplication.quit()
+
+    def _ui_log(self, text: str):
+        QtCore.QMetaObject.invokeMethod(
+            self, "append_log", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, text)
+        )
+
     @QtCore.pyqtSlot(str)
     def append_log(self, text: str):
         """可被跨執行緒透過 invokeMethod 呼叫的安全 log 方法"""

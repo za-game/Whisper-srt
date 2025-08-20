@@ -4,7 +4,8 @@ Whisper-srt 是一個利用 OpenAI Whisper 將音訊即時轉換成字幕並於�
 
 ## 安裝
 1. 安裝 Python 3.10 以上版本。
-2. 安裝相依套件：
+2. 安裝最新版 PyTorch（若使用 Facebook 翻譯模型需 2.6 以上）。GUI 的「安裝 torch/CUDA」會偵測 GPU 並取得最新相容版本。
+3. 安裝相依套件：
    ```
    pip install -r requirements.txt
    ```
@@ -35,6 +36,9 @@ Whisper-srt 是一個利用 OpenAI Whisper 將音訊即時轉換成字幕並於�
 
 如模型需要 Hugging Face 認證，程式會提示輸入 token，可先於終端機執行 `huggingface-cli login`。
 
+GUI 選單會以「(未下載)」標示尚未取得的模型或翻譯語言，且僅在沒有可用模型時顯示「未選擇」。
+
 ## 模型下載設定
 所有語音與翻譯模型的下載網址及儲存路徑集中於 `Config.json`，
-欲更換鏡像或更新版本時，修改此檔即可。預設 `model_path` 為專案根目錄下的 `hf_models`。
+欲更換鏡像或更新版本時，修改此檔即可。預設 `model_path` 為專案根目錄下的 `models`。
+GUI 下載的模型與啟動時的模型搜尋都會使用此路徑；`cache_path` 可設定 Hugging Face 暫存位置，預設為系統的 `~/.cache/huggingface/hub`。
