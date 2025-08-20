@@ -172,7 +172,15 @@ def recommend_cuda_version(driver_version):
         return "cpu", cpu_ver
     tag_versions = {t: torch_versions(t) for t in tags}
     cpu_versions = torch_versions("cpu")
-    versions = cpu_versions or sorted({v for vs in tag_versions.values() for v in vs}, key=version.parse, reverse=True)
+    versions = sorted(
+        {
+            v
+            for vs in [cpu_versions, *tag_versions.values()]
+            for v in vs
+        },
+        key=version.parse,
+        reverse=True,
+    )
     for ver in versions:
         if version.parse(ver) < MIN_TORCH:
             break
