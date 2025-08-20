@@ -47,7 +47,8 @@ else:  # Fallback for builds without qRegisterMetaType
         pass
 
 import os
-import urllib.request
+import re
+import urllib.request, urllib.parse
 import sounddevice as sd
 import signal
 import threading
@@ -147,6 +148,27 @@ def torch_wheel_exists(cuda_tag):
             return resp.status == 200
     except:
         return False
+
+
+def latest_torch_version(cuda_tag):
+    py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    if sys.platform.startswith("win"):
+        plat_tag = "win_amd64"
+    elif sys.platform.startswith("darwin"):
+        plat_tag = "macosx"
+    else:
+        plat_tag = "linux_x86_64"
+    url = f"https://download.pytorch.org/whl/{cuda_tag}/torch/"
+    try:
+        with urllib.request.urlopen(url) as resp:
+            html = urllib.parse.unquote(resp.read().decode("utf-8", "ignore"))
+        pattern = rf"torch-([\d\.]+)\+{cuda_tag}-{py_tag}-{py_tag}-{plat_tag}\.whl"
+        vers = re.findall(pattern, html)
+        if vers:
+            return str(max(vers, key=version.parse))
+    except Exception:
+        return None
+    return None
 def is_installed(pkg):
     return importlib.util.find_spec(pkg) is not None
 
@@ -172,30 +194,26 @@ def run_pip(args, log_fn=None, cancel_flag=None):
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd)
 
-def install_deps(cuda_tag, log_fn=None, cancel_flag=None):
-    pkgs = []
+def install_deps(cuda_tag, torch_ver=None, log_fn=None, cancel_flag=None):
+    torch_pkg = f"torch=={torch_ver}" if torch_ver else "torch"
     if cuda_tag.startswith("cu"):
-        # 安裝 PyTorch GPU 版
-        pkgs += [
-            "torch", "torchvision", "torchaudio",
-            "--index-url", f"https://download.pytorch.org/whl/{cuda_tag}"
+        pkgs = [
+            torch_pkg,
+            "torchvision",
+            "torchaudio",
+            "--index-url",
+            f"https://download.pytorch.org/whl/{cuda_tag}",
         ]
         run_pip(["install", "--upgrade"] + pkgs, log_fn=log_fn, cancel_flag=cancel_flag)
     else:
-        # CPU 版 PyTorch
-        run_pip(
-            [
-                "install",
-                "--upgrade",
-                "torch",
-                "torchvision",
-                "torchaudio",
-                "--index-url",
-                "https://download.pytorch.org/whl/cpu",
-            ],
-            log_fn=log_fn,
-            cancel_flag=cancel_flag,
-        )
+        pkgs = [
+            torch_pkg,
+            "torchvision",
+            "torchaudio",
+            "--index-url",
+            "https://download.pytorch.org/whl/cpu",
+        ]
+        run_pip(["install", "--upgrade"] + pkgs, log_fn=log_fn, cancel_flag=cancel_flag)
     # faster-whisper 與 PyQt5
     run_pip(
         [
@@ -1277,11 +1295,19 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
     def install_torch_cuda(self):
         try:
-            self.append_log("安裝 torch/CUDA…")
+            gpu_name, driver_ver = detect_gpu()
+            cuda_tag = recommend_cuda_version(driver_ver) if gpu_name else "cpu"
+            torch_ver = latest_torch_version(cuda_tag)
+            self.cuda_tag = cuda_tag
+            info = torch_ver or "latest"
+            self.append_log(
+                f"安裝 torch/CUDA… GPU: {gpu_name or '無'} | CUDA: {cuda_tag} | torch: {info}"
+            )
             self._run_with_progress(
                 "安裝 torch/CUDA",
                 lambda is_cancelled: install_deps(
-                    getattr(self, "cuda_tag", "cpu"),
+                    cuda_tag,
+                    torch_ver=torch_ver,
                     log_fn=self.append_log,
                     cancel_flag=is_cancelled,
                 ),
