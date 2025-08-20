@@ -32,7 +32,8 @@ import importlib.util
 from pathlib import Path
 from functools import lru_cache
 from PyQt5 import QtCore, QtWidgets, QtGui
-from huggingface_hub import HfApi, HfHubError
+from huggingface_hub import HfApi
+from huggingface_hub.utils import HfHubHTTPError
 from project_io import save_project, load_project
 
 # Register text cursor/block types for thread-safe queued connections
@@ -576,7 +577,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             try:
                 _hf_api.model_info(repo)
                 return True
-            except HfHubError as e:
+            except HfHubHTTPError as e:
                 if getattr(getattr(e, "response", None), "status_code", None) == 404:
                     continue
                 return True
