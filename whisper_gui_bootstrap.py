@@ -145,9 +145,28 @@ def detect_gpu(log_fn=None):
         if not cuda or cuda == "N/A":
             cuda = None
         return name, driver, cuda
-    except Exception as e:
-        if log_fn:
-            log_fn(f"偵測 GPU 失敗：{e}")
+    except Exception:
+        # 某些驅動版本可能不支援 --query 參數；退回解析標準輸出
+        try:
+            out_b = subprocess.check_output(["nvidia-smi"])
+            text = _decode_bytes(out_b)
+            header = next((l for l in text.splitlines() if "Driver Version" in l), "")
+            m = re.search(
+                r"Driver Version:\s*([\d.]+)\s+CUDA Version:\s*([\d.]+|N/A)",
+                header,
+            )
+            driver = m.group(1) if m else None
+            cuda = m.group(2) if m and m.group(2) != "N/A" else None
+            name_line = next(
+                (l for l in text.splitlines() if l.strip().startswith("|")), ""
+            )
+            parts = [p.strip() for p in name_line.strip("|").split("|")]
+            name = parts[0] if parts else None
+            if name and driver:
+                return name, driver, cuda
+        except Exception as e2:
+            if log_fn:
+                log_fn(f"偵測 GPU 失敗：{e2}")
         return None, None, None
 
 
