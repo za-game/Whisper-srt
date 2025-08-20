@@ -49,6 +49,7 @@ else:  # Fallback for builds without qRegisterMetaType
 
 import os
 import re
+import tempfile
 import urllib.request, urllib.parse
 import sounddevice as sd
 import signal
@@ -127,92 +128,50 @@ def list_gpus():
     except Exception:
         return []
 
-def available_cuda_tags(max_cuda: int) -> list[str]:
-    try:
-        with urllib.request.urlopen(
-            "https://download.pytorch.org/whl/torch_stable.html"
-        ) as resp:
-            html = resp.read().decode("utf-8", "ignore")
-        tags = {
-            m.group(0) for m in re.finditer(r"cu\d{3}", html)
-        }
-        return sorted(tags, key=lambda x: int(x[2:]), reverse=True)
-    except Exception:
-        if max_cuda:
-            return [f"cu{n}" for n in range(max_cuda, 110, -1)]
-        return []
 
-def _driver_to_cuda(driver_version: str | None) -> int:
-    if not driver_version:
+def _parse_cuda(cuda_version: str | None) -> int:
+    if not cuda_version:
         return 0
     try:
-        major = int(driver_version.split(".")[0])
+        return int(float(cuda_version) * 10)
     except Exception:
         return 0
-    mapping = [
-        (551, 126),
-        (550, 125),
-        (549, 124),
-        (548, 123),
-        (535, 122),
-        (531, 121),
-        (528, 120),
-        (520, 118),
-    ]
-    for min_drv, cuda in mapping:
-        if major >= min_drv:
-            return cuda
-    return 0
-
-def recommend_cuda_version(driver_version):
-    max_cuda = _driver_to_cuda(driver_version)
-    tags = [t for t in available_cuda_tags(max_cuda) if int(t[2:]) <= max_cuda]
-    if not tags:
-        cpu_ver = latest_torch_version("cpu")
-        return "cpu", cpu_ver
-    tag_versions = {t: torch_versions(t) for t in tags}
-    cpu_versions = torch_versions("cpu")
-    versions = sorted(
-        {
-            v
-            for vs in [cpu_versions, *tag_versions.values()]
-            for v in vs
-        },
-        key=version.parse,
-        reverse=True,
-    )
-    for ver in versions:
-        if version.parse(ver) < MIN_TORCH:
-            break
-        for tag in tags:
-            if ver in tag_versions.get(tag, []):
-                return tag, ver
-    cpu_ver = cpu_versions[0] if cpu_versions else None
-    return "cpu", cpu_ver
-    
-# ──────────── 套件檢查 ────────────
-def torch_versions(cuda_tag):
-    py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
-    if sys.platform.startswith("win"):
-        plat_tag = "win_amd64"
-    elif sys.platform.startswith("darwin"):
-        plat_tag = "macosx"
-    else:
-        plat_tag = "linux_x86_64"
-    url = f"https://download.pytorch.org/whl/{cuda_tag}/torch/"
-    try:
-        with urllib.request.urlopen(url) as resp:
-            html = urllib.parse.unquote(resp.read().decode("utf-8", "ignore"))
-        pattern = rf"torch-([\d\.]+)\+{cuda_tag}-{py_tag}-{py_tag}-{plat_tag}\.whl"
-        vers = sorted({v for v in re.findall(pattern, html)}, key=version.parse, reverse=True)
-        return vers
-    except Exception:
-        return []
 
 
-def latest_torch_version(cuda_tag):
-    vers = torch_versions(cuda_tag)
-    return vers[0] if vers else None
+def _candidate_cuda_tags(cuda_version: str | None) -> list[str]:
+    max_cuda = _parse_cuda(cuda_version)
+    if not max_cuda:
+        return ["cpu"]
+    nums = list(range(max_cuda, 123, -2))
+    for n in (126, 124):
+        if n <= max_cuda and n not in nums:
+            nums.append(n)
+    tags = [f"cu{n}" for n in sorted(set(nums), reverse=True)]
+    tags.append("cpu")
+    return tags
+
+
+def _probe_torch(cuda_tag: str) -> str | None:
+    index = f"https://download.pytorch.org/whl/{'cpu' if cuda_tag == 'cpu' else cuda_tag}"
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            run_pip(["download", "--no-deps", "-d", tmp, "torch", "--index-url", index])
+        except subprocess.CalledProcessError:
+            return None
+        wheels = list(Path(tmp).glob("torch-*.whl"))
+        if not wheels:
+            return None
+        m = re.search(r"torch-([\d\.]+)", wheels[0].name)
+        return m.group(1) if m else None
+
+
+def recommend_cuda_version(cuda_version: str | None):
+    for tag in _candidate_cuda_tags(cuda_version):
+        ver = _probe_torch(tag)
+        if ver:
+            return tag, ver
+    return "cpu", None
+
 def is_installed(pkg):
     return importlib.util.find_spec(pkg) is not None
 
@@ -240,24 +199,20 @@ def run_pip(args, log_fn=None, cancel_flag=None):
 
 def install_deps(cuda_tag, torch_ver=None, log_fn=None, cancel_flag=None):
     torch_pkg = f"torch=={torch_ver}" if torch_ver else "torch"
-    if cuda_tag.startswith("cu"):
-        pkgs = [
-            torch_pkg,
-            "torchvision",
-            "torchaudio",
-            "--index-url",
-            f"https://download.pytorch.org/whl/{cuda_tag}",
-        ]
-        run_pip(["install", "--upgrade"] + pkgs, log_fn=log_fn, cancel_flag=cancel_flag)
-    else:
-        pkgs = [
-            torch_pkg,
-            "torchvision",
-            "torchaudio",
-            "--index-url",
-            "https://download.pytorch.org/whl/cpu",
-        ]
-        run_pip(["install", "--upgrade"] + pkgs, log_fn=log_fn, cancel_flag=cancel_flag)
+    index = f"https://download.pytorch.org/whl/{'cpu' if cuda_tag == 'cpu' else cuda_tag}"
+    run_pip(
+        ["uninstall", "-y", "torch", "torchvision", "torchaudio"],
+        log_fn=log_fn,
+        cancel_flag=cancel_flag,
+    )
+    pkgs = [
+        torch_pkg,
+        "torchvision",
+        "torchaudio",
+        "--index-url",
+        index,
+    ]
+    run_pip(["install", "--upgrade"] + pkgs, log_fn=log_fn, cancel_flag=cancel_flag)
     # faster-whisper 與 PyQt5
     run_pip(
         [
@@ -1255,7 +1210,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
     def check_env(self):
         gpu_name, driver_ver, cuda_ver = detect_gpu()
         self.refresh_gpu_list()
-        rec_tag, _ = recommend_cuda_version(driver_ver) if driver_ver else ("cpu", latest_torch_version("cpu"))
+        rec_tag, _ = recommend_cuda_version(cuda_ver) if cuda_ver else ("cpu", _probe_torch("cpu"))
         torch_ver = _torch_version()
         torch_ok = torch_ver is not None and is_installed("faster_whisper")
         installed_tag = None
@@ -1363,7 +1318,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
     def install_torch_cuda(self):
         try:
             gpu_name, driver_ver, cuda_ver = detect_gpu()
-            cuda_tag, torch_ver = recommend_cuda_version(driver_ver) if gpu_name else ("cpu", latest_torch_version("cpu"))
+            cuda_tag, torch_ver = (
+                recommend_cuda_version(cuda_ver) if gpu_name and cuda_ver else ("cpu", _probe_torch("cpu"))
+            )
             self.cuda_tag = cuda_tag
             info = torch_ver or "latest"
             self.append_log(
