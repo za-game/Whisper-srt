@@ -57,6 +57,7 @@ import threading
 import time
 import tqdm
 import numpy as np
+import locale
 from packaging import version
 from overlay import Settings, SubtitleOverlay, Tray
 from srt_utils import LiveSRTWatcher
@@ -72,7 +73,10 @@ CACHE_DEFAULT = str(Path.home() / ".cache" / "huggingface" / "hub")
 CACHE_PATH = Path(CONFIG.get("cache_path", CACHE_DEFAULT)).expanduser().resolve()
 CACHE_PATH.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(CACHE_PATH))
-os.environ.setdefault("HF_HOME", str(CACHE_PATH))
+
+CUDA_TAGS = ("cu126", "cu124", "cu121")
+FORCE_CUDA = os.getenv("FORCE_CUDA") == "1"
+
 MIN_TORCH = version.parse("2.6")
 TORCH_PROBE_SERIES = ["", "~=2.8", "~=2.7", "~=2.6"]
 
@@ -100,34 +104,67 @@ def list_audio_devices():
     except Exception as e:
         devices.append((-1, f"偵測失敗: {e}", 16000))
     return devices
+
+
+def _calc_rms(audio) -> float:
+    a = np.asarray(audio)
+    if a.dtype.kind in ("i", "u"):
+        a = a.astype(np.float32) / np.iinfo(a.dtype).max
+    else:
+        a = a.astype(np.float32, copy=False)
+    a = np.nan_to_num(a, nan=0.0, posinf=1.0, neginf=-1.0)
+    a = np.clip(a, -1.0, 1.0)
+    return float(np.sqrt(np.mean(a * a)))
 # ──────────── GPU 偵測 ────────────
-def detect_gpu():
+def _decode_bytes(data: bytes) -> str:
+    enc = locale.getpreferredencoding(False)
+    try:
+        return data.decode(enc)
+    except UnicodeDecodeError:
+        try:
+            return data.decode("utf-8", errors="replace")
+        except Exception:
+            return data.decode("latin-1", errors="replace")
+
+
+def detect_gpu(log_fn=None):
     if not shutil.which("nvidia-smi"):
+        if log_fn:
+            log_fn("偵測 GPU 失敗：找不到 nvidia-smi")
         return None, None, None
     try:
-        out = subprocess.check_output(
+        out_b = subprocess.check_output(
             [
                 "nvidia-smi",
                 "--query-gpu=name,driver_version,cuda_version",
                 "--format=csv,noheader",
-            ],
-            encoding="utf-8",
-        ).strip().split("\n")[0]
+            ]
+        )
+        out = _decode_bytes(out_b).strip().split("\n")[0]
         name, driver, cuda = [x.strip() for x in out.split(",")]
+        if not cuda or cuda == "N/A":
+            cuda = None
         return name, driver, cuda
-    except Exception:
+    except Exception as e:
+        if log_fn:
+            log_fn(f"偵測 GPU 失敗：{e}")
         return None, None, None
 
-def list_gpus():
+
+def list_gpus(log_fn=None):
     if not shutil.which("nvidia-smi"):
+        if log_fn:
+            log_fn("偵測 GPU 失敗：找不到 nvidia-smi")
         return []
     try:
-        out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            encoding="utf-8",
+        out_b = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"]
         )
+        out = _decode_bytes(out_b)
         return [n.strip() for n in out.splitlines() if n.strip()]
-    except Exception:
+    except Exception as e:
+        if log_fn:
+            log_fn(f"偵測 GPU 失敗：{e}")
         return []
 
 
@@ -141,10 +178,12 @@ def _parse_cuda(cuda_version: str | None) -> int:
 
 
 def _candidate_cuda_tags(cuda_version: str | None) -> list[str]:
+    if not cuda_version:
+        return list(CUDA_TAGS) + ["cpu"]
     max_cuda = _parse_cuda(cuda_version)
-    if not max_cuda:
-        return ["cpu"]
-    nums = list(range(max_cuda, 123, -2))
+    nums = list(range(max_cuda, 120, -2))
+    if max_cuda >= 121:
+        nums.append(121)
     for n in (126, 124):
         if n <= max_cuda and n not in nums:
             nums.append(n)
@@ -195,6 +234,8 @@ def _probe_torch_with_backoff(
             if ver < MIN_TORCH:
                 continue
             return str(ver), index_url
+    if log_fn:
+        log_fn(f"在 {cuda_tag} 通道找不到適用輪檔")
     return None, None
 
 
@@ -214,26 +255,24 @@ def recommend_cuda_version(cuda_version: str | None, log_fn=None):
 
 def _gather_env() -> dict:
     gpu_name, driver_ver, cuda_ver = detect_gpu()
-    if cuda_ver:
-        rec_tag, _, _ = recommend_cuda_version(cuda_ver)
-    else:
-        rec_tag = "cpu"
+    rec_tag, _, _ = recommend_cuda_version(cuda_ver)
     torch_ver = _torch_version()
-    torch_ok = torch_ver is not None and is_installed("faster_whisper")
+    torch_ok = torch_ver is not None
+    fw_ok = is_installed("faster_whisper")
     installed_tag = None
+    cuda_ready = False
     cuda_tag = rec_tag
     if torch_ver:
         try:
             import torch  # type: ignore
 
-            state = torch.__version__
-            if torch.cuda.is_available() and torch.version.cuda:
+            if torch.version.cuda:
                 installed_tag = f"cu{torch.version.cuda.replace('.', '')}"
-                cuda_tag = installed_tag
-                if not gpu_name:
-                    gpu_name = torch.cuda.get_device_name(0)
-            else:
-                cuda_tag = rec_tag
+            cuda_ready = torch.cuda.is_available()
+            if not gpu_name and cuda_ready:
+                gpu_name = torch.cuda.get_device_name(0)
+            cuda_tag = installed_tag or rec_tag
+            state = f"{'CUDA 版' if installed_tag else 'CPU 版'} {torch.__version__}"
         except Exception:
             state = str(torch_ver)
             cuda_tag = rec_tag
@@ -247,9 +286,11 @@ def _gather_env() -> dict:
         "rec_tag": rec_tag,
         "torch_ver": torch_ver,
         "torch_ok": torch_ok,
+        "fw_ok": fw_ok,
         "installed_tag": installed_tag,
         "state": state,
         "cuda_tag": cuda_tag,
+        "cuda_ready": cuda_ready,
     }
 
 
@@ -539,10 +580,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
         main_tab.setLayout(main_layout)
 
         env_layout = QtWidgets.QVBoxLayout()
-        self.pkg_label = QtWidgets.QLabel("torch/CUDA: 未檢測")
+        self.pkg_label = QtWidgets.QLabel("Torch: 未檢測")
+        self.fw_label = QtWidgets.QLabel("faster-whisper: 未檢測")
         self.gpu_label = QtWidgets.QLabel("GPU: 未檢測")
         self.driver_label = QtWidgets.QLabel("驅動版本: 未檢測")
         env_layout.addWidget(self.pkg_label)
+        env_layout.addWidget(self.fw_label)
         env_layout.addWidget(self.gpu_label)
         env_layout.addWidget(self.driver_label)
         self.detect_gpu_btn = QtWidgets.QPushButton("偵測GPU加速")
@@ -1146,7 +1189,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 int(duration * sr), samplerate=sr, channels=1, dtype="float32", device=dev_id
             )
             sd.wait()
-            rms = float(np.sqrt(np.mean(np.square(audio))))
+            rms = _calc_rms(audio)
             noise_db = 20 * np.log10(rms + 1e-12)
             if noise_db < -45:
                 level = 0
@@ -1167,9 +1210,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
         dev_data = self.audio_device_combo.currentData()
         dev_id, sr = dev_data if dev_data is not None else (-1, 16000)
         try:
-            audio = sd.rec(int(0.05 * sr), samplerate=sr, channels=1, dtype="float32", device=dev_id)
+            audio = sd.rec(
+                int(0.05 * sr), samplerate=sr, channels=1, dtype="float32", device=dev_id
+            )
             sd.wait()
-            rms = float(np.sqrt(np.mean(np.square(audio))))
+            rms = _calc_rms(audio)
             level = min(100, int(rms * 1000))
             self.mic_level_bar.setValue(level)
         except Exception:
@@ -1305,7 +1350,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
         if getattr(self, "_env_worker", None) and self._env_worker.isRunning():
             return
         self.refresh_gpu_list()
-        self.pkg_label.setText("torch/CUDA: 檢查中…")
+        self.pkg_label.setText("Torch: 檢查中…")
+        self.fw_label.setText("faster-whisper: 檢查中…")
         self.gpu_label.setText("GPU: 檢查中…")
         self.driver_label.setText("驅動版本: 檢查中…")
         self._ui_log("檢查環境中…")
@@ -1321,9 +1367,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
         rec_tag = info["rec_tag"]
         torch_ver = info["torch_ver"]
         torch_ok = info["torch_ok"]
+        fw_ok = info["fw_ok"]
         installed_tag = info["installed_tag"]
         state = info["state"]
         self.cuda_tag = info["cuda_tag"]
+        cuda_ready = info["cuda_ready"]
 
         if not gpu_name:
             self.gpu_label.setText("GPU: 無")
@@ -1343,13 +1391,16 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         if rec_tag == "cpu" and installed_tag:
             rec_tag = installed_tag
-        self.pkg_label.setText(f"torch/CUDA: {state} (推薦 {rec_tag})")
-        self._update_cuda_option(torch_ok and (installed_tag or rec_tag != "cpu"))
+        self.pkg_label.setText(f"Torch: {state} (推薦 {rec_tag})")
+        self.fw_label.setText(
+            f"faster-whisper: {'已安裝' if fw_ok else '未安裝'}"
+        )
+        self._update_cuda_option(cuda_ready)
         if torch_ok:
             if torch_ver and torch_ver < MIN_TORCH:
                 self._ui_log(f"PyTorch 版本過低，翻譯模型需 {MIN_TORCH}+。")
             else:
-                self._ui_log("環境已安裝，可直接啟動。")
+                self._ui_log(f"環境已安裝。CUDA 就緒: {cuda_ready}")
         else:
             self._ui_log("需要安裝相應套件。")
 
@@ -1410,29 +1461,59 @@ class BootstrapWin(QtWidgets.QMainWindow):
     def install_torch_cuda(self):
         try:
             def task(is_cancelled):
-                gpu_name, driver_ver, cuda_ver = detect_gpu()
-                if gpu_name and cuda_ver:
-                    tag, ver, index = recommend_cuda_version(
-                        cuda_ver, log_fn=self._ui_log
-                    )
+                py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+                plat = "win_amd64" if sys.platform.startswith("win") else "linux_x86_64"
+                if FORCE_CUDA:
+                    self._ui_log("FORCE_CUDA 啟用，跳過 GPU 偵測")
+                    gpu_name = driver_ver = cuda_ver = None
+                    tags = list(CUDA_TAGS) + ["cpu"]
                 else:
-                    ver, index = _probe_torch_with_backoff("cpu", log_fn=self._ui_log)
+                    gpu_name, driver_ver, cuda_ver = detect_gpu(log_fn=self._ui_log)
+                    if gpu_name:
+                        self._ui_log(
+                            f"偵測到 NVIDIA GPU：{gpu_name}，驅動 {driver_ver}，CUDA {cuda_ver or '未知/N/A'}"
+                        )
+                        tags = _candidate_cuda_tags(cuda_ver)
+                    else:
+                        self._ui_log("偵測 GPU 失敗：依序嘗試 CUDA 通道")
+                        tags = list(CUDA_TAGS) + ["cpu"]
+                chosen_tag = "cpu"
+                torch_ver = None
+                index = None
+                tried = []
+                for tag in tags:
+                    tried.append(tag)
+                    self._ui_log(f"嘗試安裝通道：{tag}")
+                    ver, idx = _probe_torch_with_backoff(tag, log_fn=self._ui_log)
+                    if ver:
+                        chosen_tag, torch_ver, index = tag, ver, idx
+                        break
+                    if tag != "cpu":
+                        self._ui_log(
+                            f"探測 {tag} 通道無可用輪檔（可能無對應 {py_tag} {plat})"
+                        )
+                if chosen_tag == "cpu":
                     if index is None:
                         index = "https://download.pytorch.org/whl/cpu"
-                    tag = "cpu"
-                self.cuda_tag = tag
-                info = ver or "latest"
+                    if any(t != "cpu" for t in tried):
+                        self._ui_log("全部 CUDA 通道皆不可用，回退至 CPU")
+                        if gpu_name or FORCE_CUDA:
+                            self._ui_log(
+                                "提示：此 Python/平台目前可能缺少 cu126/cu124/cu121 對應輪檔；可嘗試改用其他 CUDA 通道，或臨時改 Python 次版（例如 3.10/3.12）"
+                            )
+                self.cuda_tag = chosen_tag
+                info = torch_ver or "latest"
                 self._ui_log(
-                    f"安裝 torch/CUDA… GPU: {gpu_name or '無'} | 通道: {tag} | torch: {info}"
+                    f"安裝 torch/CUDA… GPU: {gpu_name or '無'} | 通道: {chosen_tag} | torch: {info}"
                 )
                 install_deps(
-                    tag,
-                    torch_ver=ver,
+                    chosen_tag,
+                    torch_ver=torch_ver,
                     index_url=index,
                     log_fn=self._ui_log,
                     cancel_flag=is_cancelled,
                 )
-                return {"cuda_tag": tag, "gpu_name": gpu_name}
+                return {"cuda_tag": chosen_tag, "gpu_name": gpu_name}
 
             result = self._run_with_progress(
                 "安裝 torch/CUDA", task, label="安裝中…"
@@ -1808,6 +1889,13 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.status.verticalScrollBar().setValue(self.status.verticalScrollBar().maximum())
 # ──────────── 主程式 ────────────
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--force-cuda", action="store_true")
+    args, qt_args = parser.parse_known_args()
+    FORCE = args.force_cuda or FORCE_CUDA
+
     def _sigint_handler(*_):
         app = QtWidgets.QApplication.instance()
         for w in app.topLevelWidgets():
@@ -1815,9 +1903,13 @@ if __name__ == "__main__":
                 w.stop_clicked()
                 break
         QtWidgets.QApplication.quit()
-    try: signal.signal(signal.SIGINT, _sigint_handler)
-    except Exception: pass
-    app = QtWidgets.QApplication(sys.argv)
+
+    try:
+        signal.signal(signal.SIGINT, _sigint_handler)
+    except Exception:
+        pass
+    FORCE_CUDA = FORCE
+    app = QtWidgets.QApplication(qt_args)
     app.setQuitOnLastWindowClosed(False)
     win = BootstrapWin()
     win.show()
