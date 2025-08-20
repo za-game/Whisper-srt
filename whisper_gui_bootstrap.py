@@ -63,7 +63,6 @@ with (ROOT_DIR / "Config.json").open(encoding="utf-8") as f:
     CONFIG = json.load(f)
 MODEL_PATH = (ROOT_DIR / CONFIG.get("model_path", "models")).resolve()
 MODEL_PATH.mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("HF_HOME", str(MODEL_PATH))
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(MODEL_PATH))
 os.environ.setdefault("TRANSFORMERS_CACHE", str(MODEL_PATH))
 MODEL_REPO_MAP = CONFIG["MODEL_REPO_MAP"]
@@ -473,12 +472,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self._auto_open_last_project)
         # —— 統一的本地模型資料夾：model_path/<Repo> —— #
     def _repo_local_dir(self, repo_id: str) -> Path:
-        d = (MODEL_PATH / repo_id.replace("/", "--"))
-        try:
-            d.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-        return d
+        return MODEL_PATH / repo_id.replace("/", "--")
 
     def _update_translate_lang_options(self):
         opts = ["JA", "EN", "KO", "ZH"]
