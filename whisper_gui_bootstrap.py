@@ -486,6 +486,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.translate_lang_combo.blockSignals(True)
         self.translate_lang_combo.clear()
         model = self.translate_lang_combo.model()
+        available_items: list[tuple[int, str]] = []
         for i, code in enumerate(opts):
             pair = (src.lower(), code.lower())
             repo = TRANSLATE_REPO_MAP.get(pair)
@@ -496,9 +497,13 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.translate_lang_combo.addItem(text, code)
             brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
             model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
-        if "EN" in opts:
-            self.translate_lang_combo.setCurrentIndex(opts.index("EN"))
-        elif opts:
+            if available:
+                available_items.append((i, code))
+        if available_items:
+            target = next((i for i, c in available_items if c == "EN"), available_items[0][0])
+            self.translate_lang_combo.setCurrentIndex(target)
+        else:
+            self.translate_lang_combo.insertItem(0, "未選擇", "")
             self.translate_lang_combo.setCurrentIndex(0)
         self.translate_lang_combo.blockSignals(False)
         self._last_trans_index = self.translate_lang_combo.currentIndex()
@@ -524,13 +529,31 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
     def _refresh_model_items(self):
         model = self.model_combo.model()
+        available_names: list[str] = []
         for i in range(self.model_combo.count()):
             base = self.model_combo.itemData(i)
+            if not base:
+                continue
             available = self._model_downloaded(base)
             text = base if available else f"{base} (未下載)"
             self.model_combo.setItemText(i, text)
             brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
             model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
+            if available:
+                available_names.append(base)
+        placeholder_idx = self.model_combo.findData("")
+        if available_names:
+            if placeholder_idx != -1:
+                self.model_combo.removeItem(placeholder_idx)
+            current_name = self.model_combo.currentData()
+            if not current_name or not self._model_downloaded(current_name):
+                self.model_combo.setCurrentIndex(self.model_combo.findData(available_names[0]))
+        else:
+            if placeholder_idx == -1:
+                self.model_combo.insertItem(0, "未選擇", "")
+                placeholder_idx = 0
+            self.model_combo.setCurrentIndex(placeholder_idx)
+        self._last_model_index = self.model_combo.currentIndex()
 
     def _set_model_name(self, name: str):
         for i in range(self.model_combo.count()):
@@ -543,6 +566,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
     def _on_model_changed(self, idx: int):
         base = self.model_combo.itemData(idx)
+        if not base:
+            self._last_model_index = idx
+            return
         if not self._model_downloaded(base):
             resp = QtWidgets.QMessageBox.question(
                 self,
@@ -566,9 +592,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.schedule_autosave(300)
 
     def _on_translate_lang_changed(self, idx: int):
+        tgt = self.translate_lang_combo.itemData(idx)
+        if not tgt:
+            self._last_trans_index = idx
+            return
         src = self.lang_combo.currentText().lower()
-        tgt = self.translate_lang_combo.itemData(idx).lower()
-        repo = TRANSLATE_REPO_MAP.get((src, tgt))
+        repo = TRANSLATE_REPO_MAP.get((src, tgt.lower()))
         if repo and not self._translate_model_downloaded(repo):
             resp = QtWidgets.QMessageBox.question(
                 self,
