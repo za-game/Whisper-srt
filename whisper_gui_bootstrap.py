@@ -239,6 +239,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.srt_watcher = None
         self.proc = None  # mWhisperSub 子程序的 handle
 
+        # project autosave
+        self._autosave_timer = QtCore.QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.timeout.connect(self._do_autosave)
+        self._autosave_pending = False
+
         # 參數設定區
         form_layout = QtWidgets.QFormLayout()
 
@@ -475,11 +481,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self._update_model_default()
         self._update_model_default()
         QtCore.QTimer.singleShot(100, self.check_env)
-        # project autosave
-        self._autosave_timer = QtCore.QTimer(self)
-        self._autosave_timer.setSingleShot(True)
-        self._autosave_timer.timeout.connect(self._do_autosave)
-        self._autosave_pending = False
         self._level_timer = QtCore.QTimer(self)
         self._level_timer.timeout.connect(self._poll_mic_level)
         self._level_timer.start(200)
