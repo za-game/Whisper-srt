@@ -166,28 +166,24 @@ def _driver_to_cuda(driver_version: str | None) -> int:
 
 def recommend_cuda_version(driver_version):
     max_cuda = _driver_to_cuda(driver_version)
-    best_tag: Optional[str] = None
-    best_ver: Optional[str] = None
-    for tag in available_cuda_tags(max_cuda):
-        try:
-            tag_num = int(tag[2:])
-        except ValueError:
-            continue
-        if tag_num <= max_cuda:
-            latest = latest_torch_version(tag)
-            if latest:
-                if version.parse(latest) >= MIN_TORCH:
-                    if not best_ver or version.parse(latest) > version.parse(best_ver):
-                        best_tag, best_ver = tag, latest
-            elif best_tag is None:
-                best_tag, best_ver = tag, None
-    if best_tag:
-        return best_tag, best_ver
-    cpu_ver = latest_torch_version("cpu")
+    tags = [t for t in available_cuda_tags(max_cuda) if int(t[2:]) <= max_cuda]
+    if not tags:
+        cpu_ver = latest_torch_version("cpu")
+        return "cpu", cpu_ver
+    tag_versions = {t: torch_versions(t) for t in tags}
+    cpu_versions = torch_versions("cpu")
+    versions = cpu_versions or sorted({v for vs in tag_versions.values() for v in vs}, key=version.parse, reverse=True)
+    for ver in versions:
+        if version.parse(ver) < MIN_TORCH:
+            break
+        for tag in tags:
+            if ver in tag_versions.get(tag, []):
+                return tag, ver
+    cpu_ver = cpu_versions[0] if cpu_versions else None
     return "cpu", cpu_ver
     
 # ──────────── 套件檢查 ────────────
-def latest_torch_version(cuda_tag):
+def torch_versions(cuda_tag):
     py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
     if sys.platform.startswith("win"):
         plat_tag = "win_amd64"
@@ -200,12 +196,15 @@ def latest_torch_version(cuda_tag):
         with urllib.request.urlopen(url) as resp:
             html = urllib.parse.unquote(resp.read().decode("utf-8", "ignore"))
         pattern = rf"torch-([\d\.]+)\+{cuda_tag}-{py_tag}-{py_tag}-{plat_tag}\.whl"
-        vers = re.findall(pattern, html)
-        if vers:
-            return str(max(vers, key=version.parse))
+        vers = sorted({v for v in re.findall(pattern, html)}, key=version.parse, reverse=True)
+        return vers
     except Exception:
-        return None
-    return None
+        return []
+
+
+def latest_torch_version(cuda_tag):
+    vers = torch_versions(cuda_tag)
+    return vers[0] if vers else None
 def is_installed(pkg):
     return importlib.util.find_spec(pkg) is not None
 
