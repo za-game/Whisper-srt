@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import os
 import queue
@@ -65,34 +66,21 @@ conf_thr_max = 0.8
 conf_thr = conf_thr_base
 CONF_THR_STEP = 0.02
 
+# 讀取共用設定
+ROOT_DIR = Path(__file__).resolve().parent
+CONFIG = json.loads((ROOT_DIR / "Config.json").read_text(encoding="utf-8"))
+MODEL_PATH = ROOT_DIR / CONFIG.get("model_path", "hf_models")
+MODEL_PATH.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("HF_HOME", str(MODEL_PATH))
+_REPO_MAP = CONFIG["MODEL_REPO_MAP"]
+TRANSLATE_MODEL_MAP = {
+    tuple(k.split("-")): v for k, v in CONFIG["TRANSLATE_REPO_MAP"].items()
+}
+
 # 3. ─────────────────────────── CLI ───────────────────────────
 parser = argparse.ArgumentParser(description="Realtime Whisper→SRT 轉寫器")
-# 允許簡名映射到 HuggingFace Repo
-_REPO_MAP = {
-    "tiny": "Systran/faster-whisper-tiny",
-    "base": "Systran/faster-whisper-base",
-    "small": "Systran/faster-whisper-small",
-    "medium": "Systran/faster-whisper-medium",
-    "large-v2": "Systran/faster-whisper-large-v2",
-}
-
-TRANSLATE_MODEL_MAP = {
-    ("en", "ja"): "Helsinki-NLP/opus-mt-en-ja",
-    ("en", "ko"): "Helsinki-NLP/opus-mt-en-ko",
-    ("en", "zh"): "Helsinki-NLP/opus-mt-en-zh",
-    ("ja", "en"): "Helsinki-NLP/opus-mt-ja-en",
-    ("ko", "en"): "Helsinki-NLP/opus-mt-ko-en",
-    ("zh", "en"): "Helsinki-NLP/opus-mt-zh-en",
-    ("ja", "ko"): "facebook/m2m100_418M",
-    ("ko", "ja"): "facebook/m2m100_418M",
-    ("ja", "zh"): "facebook/m2m100_418M",
-    ("zh", "ja"): "facebook/m2m100_418M",
-    ("zh", "ko"): "facebook/nllb-200-distilled-600M",
-    ("ko", "zh"): "facebook/nllb-200-distilled-600M",
-}
-
 # 3-1 模型與裝置
-parser.add_argument("--model_dir", default="models/medium")
+parser.add_argument("--model_dir", default="medium")
 parser.add_argument("--gpu", type=int, default=0, help="<0=CPU, 0+=GPU index")
 parser.add_argument("--compute_type", default="int8_float16",
                     choices=["int8", "int8_float16", "float16", "float32"])
@@ -172,12 +160,16 @@ if args.freq_list:
     except Exception as e:
         print(f"[詞頻] 無法讀取 {args.freq_list}: {e}")
 
-# 若給的是簡名且不是目錄，映射成正式 Repo ID
-if ("/" not in args.model_dir) and (not os.path.isdir(args.model_dir)):
-    mapped = _REPO_MAP.get(args.model_dir, args.model_dir)
-    if mapped != args.model_dir:
-        print(f"[模型] 已映射：{args.model_dir} → {mapped}")
-        args.model_dir = mapped
+# 若不是現有目錄，優先使用 Config 指定的 model_path
+if not os.path.isdir(args.model_dir):
+    local_dir = MODEL_PATH / args.model_dir.replace("/", "--")
+    if local_dir.is_dir():
+        args.model_dir = str(local_dir)
+    else:
+        mapped = _REPO_MAP.get(args.model_dir, args.model_dir)
+        if mapped != args.model_dir:
+            print(f"[模型] 已映射：{args.model_dir} → {mapped}")
+            args.model_dir = mapped
 if args.list_devices:
     print(sd.query_devices())
     raise SystemExit
@@ -189,7 +181,11 @@ if args.translate:
         _use_translate_task = True
     else:
         pair = (args.lang, args.translate_lang)
-        if args.lang == "auto" or pair not in TRANSLATE_MODEL_MAP:
+        if args.lang == "auto":
+            _use_translate_task = True
+            pair = ("en", args.translate_lang)
+            TRANSLATE_MODEL_MAP[pair] = "facebook/m2m100_418M"
+        elif pair not in TRANSLATE_MODEL_MAP:
             _use_translate_task = True
             pair = ("en", args.translate_lang)
         _translate_pair = pair
@@ -363,7 +359,7 @@ def _load_translate_pipe(src: str, tgt: str):
             kwargs["tgt_lang"] = nllb[tgt]
         while True:
             try:
-                pipe = pipeline("translation", model=model, **kwargs)
+                pipe = pipeline("translation", model=model, cache_dir=str(MODEL_PATH), **kwargs)
                 break
             except Exception as exc:  # pragma: no cover - runtime dependency
                 err = str(exc)

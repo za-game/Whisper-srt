@@ -11,6 +11,7 @@ Whisper Live Caption – EXE 發佈專用啟動器
 5. 完成後啟動 mWhisperSub.py，並在本程式內建字幕 Overlay + 系統匣設定
 """
 import sys, os
+import json
 def ensure_local_path():
     base_dir = os.path.dirname(__file__)
 
@@ -58,28 +59,14 @@ ROOT_DIR = Path(__file__).resolve().parent
 ENGINE_PY = ROOT_DIR / "mWhisperSub.py"
 OVERLAY_PY = ROOT_DIR / "srt_overlay_tool.py"
 
-# Systran faster-whisper 對應表（UI 簡名 -> HF Repo ID）
-MODEL_REPO_MAP = {
-    "tiny":     "Systran/faster-whisper-tiny",
-    "base":     "Systran/faster-whisper-base",
-    "small":    "Systran/faster-whisper-small",
-    "medium":   "Systran/faster-whisper-medium",
-    "large-v2": "Systran/faster-whisper-large-v2",
-}
-
+with (ROOT_DIR / "Config.json").open(encoding="utf-8") as f:
+    CONFIG = json.load(f)
+MODEL_PATH = (ROOT_DIR / CONFIG.get("model_path", "hf_models")).resolve()
+MODEL_PATH.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("HF_HOME", str(MODEL_PATH))
+MODEL_REPO_MAP = CONFIG["MODEL_REPO_MAP"]
 TRANSLATE_REPO_MAP = {
-    ("en", "ja"): "Helsinki-NLP/opus-mt-en-ja",
-    ("en", "ko"): "Helsinki-NLP/opus-mt-en-ko",
-    ("en", "zh"): "Helsinki-NLP/opus-mt-en-zh",
-    ("ja", "en"): "Helsinki-NLP/opus-mt-ja-en",
-    ("ko", "en"): "Helsinki-NLP/opus-mt-ko-en",
-    ("zh", "en"): "Helsinki-NLP/opus-mt-zh-en",
-    ("ja", "ko"): "facebook/m2m100_418M",
-    ("ko", "ja"): "facebook/m2m100_418M",
-    ("ja", "zh"): "facebook/m2m100_418M",
-    ("zh", "ja"): "facebook/m2m100_418M",
-    ("zh", "ko"): "facebook/nllb-200-distilled-600M",
-    ("ko", "zh"): "facebook/nllb-200-distilled-600M",
+    tuple(k.split("-")): v for k, v in CONFIG["TRANSLATE_REPO_MAP"].items()
 }
 
 # ──────────── 錄音設備偵測 ────────────
@@ -249,10 +236,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         self.translate_chk = QtWidgets.QCheckBox("翻譯")
         self.translate_lang_combo = QtWidgets.QComboBox()
-        self.translate_lang_combo.addItems(["JA", "EN", "KO", "ZH"])
-        self.translate_lang_combo.setCurrentText("EN")
         self.translate_lang_combo.setEnabled(False)
         self.translate_chk.toggled.connect(self.translate_lang_combo.setEnabled)
+        self.lang_combo.currentTextChanged.connect(self._update_translate_lang_options)
+        self._update_translate_lang_options()
         # 翻譯語言僅在勾選翻譯時生效
         form_layout.addRow(self.translate_chk, self.translate_lang_combo)
 
@@ -481,19 +468,31 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.installEventFilter(self)
         # 啟動時嘗試還原上次專案（使用全域 QSettings）
         QtCore.QTimer.singleShot(0, self._auto_open_last_project)
-        # —— 統一的本地模型資料夾：hf_models/<Repo> —— #
+        # —— 統一的本地模型資料夾：model_path/<Repo> —— #
     def _repo_local_dir(self, repo_id: str) -> Path:
-        d = (ROOT_DIR / "hf_models" / repo_id.replace("/", "--"))
+        d = (MODEL_PATH / repo_id.replace("/", "--"))
         try:
             d.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
         return d
 
+    def _update_translate_lang_options(self):
+        opts = ["JA", "EN", "KO", "ZH"]
+        src = self.lang_combo.currentText().upper()
+        if src in opts:
+            opts.remove(src)
+        self.translate_lang_combo.clear()
+        self.translate_lang_combo.addItems(opts)
+        if "EN" in opts:
+            self.translate_lang_combo.setCurrentText("EN")
+        elif opts:
+            self.translate_lang_combo.setCurrentIndex(0)
+
     def _model_downloaded(self, name: str) -> bool:
         local_dir = ROOT_DIR / "models" / name
         repo = MODEL_REPO_MAP.get(name, name)
-        hf_dir = ROOT_DIR / "hf_models" / repo.replace("/", "--")
+        hf_dir = MODEL_PATH / repo.replace("/", "--")
         if local_dir.exists() and any(local_dir.iterdir()):
             return True
         if hf_dir.exists() and any(hf_dir.iterdir()):
@@ -1185,7 +1184,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         def worker():
             try:
-                # ✅ 不分平台：一律下載到專案內的 hf_models/<Repo>
+                # ✅ 不分平台：一律下載到專案內的 model_path/<Repo>
                 local_dir = self._repo_local_dir(repo_id)
                 QtCore.QMetaObject.invokeMethod(
                     self, "append_log", QtCore.Qt.QueuedConnection,
@@ -1242,7 +1241,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         model_name = self.model_combo.currentData()
         # ① 先找你既有的 models/<name> 目錄
         local_model_dir = (ROOT_DIR / "models" / model_name)
-        # ② 再找我們剛剛下載到的專案本地資料夾 hf_models/<Repo>
+        # ② 再找我們剛剛下載到的專案本地資料夾 model_path/<Repo>
         repo = MODEL_REPO_MAP.get(model_name, model_name)
         local_hf_dir = self._repo_local_dir(repo)
         if local_model_dir.exists():
@@ -1309,7 +1308,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
         if temp_str:
             args += ["--temperature", temp_str]
         # 啟動 mWhisperSub（在 Windows 上讓它進入新的 process group，之後可用 CTRL_BREAK_EVENT 做優雅關閉）
-        popen_kwargs = {"cwd": ROOT_DIR}
+        env = os.environ.copy()
+        env.setdefault("HF_HOME", str(MODEL_PATH))
+        popen_kwargs = {"cwd": ROOT_DIR, "env": env}
         if os.name == "nt":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
             if self.console_chk.isChecked():

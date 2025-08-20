@@ -36,4 +36,5 @@ Whisper-srt 是一個利用 OpenAI Whisper 將音訊即時轉換成字幕並於�
 如模型需要 Hugging Face 認證，程式會提示輸入 token，可先於終端機執行 `huggingface-cli login`。
 
 ## 模型下載設定
-所有語音與翻譯模型的下載網址集中於 `Model_link.js`，欲更換鏡像或更新版本時，修改此檔即可。
+所有語音與翻譯模型的下載網址及儲存路徑集中於 `Config.json`，
+欲更換鏡像或更新版本時，修改此檔即可。預設 `model_path` 為專案根目錄下的 `hf_models`。
