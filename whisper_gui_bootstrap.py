@@ -127,7 +127,7 @@ def list_gpus():
     except Exception:
         return []
 
-def available_cuda_tags():
+def available_cuda_tags(max_cuda: int) -> list[str]:
     try:
         with urllib.request.urlopen(
             "https://download.pytorch.org/whl/torch_stable.html"
@@ -138,7 +138,9 @@ def available_cuda_tags():
         }
         return sorted(tags, key=lambda x: int(x[2:]), reverse=True)
     except Exception:
-        return [f"cu{n}" for n in range(126, 117, -1)]
+        if max_cuda:
+            return [f"cu{n}" for n in range(max_cuda, 110, -1)]
+        return []
 
 
 def recommend_cuda_version(cuda_version):
@@ -148,7 +150,7 @@ def recommend_cuda_version(cuda_version):
         max_cuda = 0
     best_tag: Optional[str] = None
     best_ver: Optional[str] = None
-    for tag in available_cuda_tags():
+    for tag in available_cuda_tags(max_cuda):
         try:
             tag_num = int(tag[2:])
         except ValueError:
