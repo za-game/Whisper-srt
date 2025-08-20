@@ -53,6 +53,13 @@ import signal
 import threading
 import tqdm
 import numpy as np
+try:
+    import torch
+except Exception as e:  # pragma: no cover - informative error
+    raise RuntimeError(
+        "PyTorch 2.6 or newer is required; please install an appropriate version"
+    ) from e
+from packaging import version
 from overlay import Settings, SubtitleOverlay, Tray
 from srt_utils import LiveSRTWatcher
 ROOT_DIR = Path(__file__).resolve().parent
@@ -67,7 +74,12 @@ CACHE_DEFAULT = str(Path.home() / ".cache" / "huggingface" / "hub")
 CACHE_PATH = Path(CONFIG.get("cache_path", CACHE_DEFAULT)).expanduser().resolve()
 CACHE_PATH.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(CACHE_PATH))
-os.environ.setdefault("TRANSFORMERS_CACHE", str(CACHE_PATH))
+os.environ.setdefault("HF_HOME", str(CACHE_PATH))
+MIN_TORCH = version.parse("2.6")
+if version.parse(torch.__version__.split("+")[0]) < MIN_TORCH:
+    raise RuntimeError(
+        f"PyTorch {MIN_TORCH} or newer is required; found {torch.__version__}"
+    )
 MODEL_REPO_MAP = CONFIG["MODEL_REPO_MAP"]
 TRANSLATE_REPO_MAP = {
     tuple(k.split("-")): v for k, v in CONFIG["TRANSLATE_REPO_MAP"].items()

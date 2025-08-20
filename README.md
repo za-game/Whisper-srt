@@ -4,7 +4,8 @@ Whisper-srt 是一個利用 OpenAI Whisper 將音訊即時轉換成字幕並於�
 
 ## 安裝
 1. 安裝 Python 3.10 以上版本。
-2. 安裝相依套件：
+2. 安裝 PyTorch 2.6 以上版本。
+3. 安裝相依套件：
    ```
    pip install -r requirements.txt
    ```

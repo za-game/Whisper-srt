@@ -45,6 +45,13 @@ import webrtcvad
 from faster_whisper import WhisperModel
 from transformers import pipeline
 from huggingface_hub import login as hf_login
+try:
+    import torch
+except Exception as e:  # pragma: no cover - informative error
+    raise RuntimeError(
+        "PyTorch 2.6 or newer is required; please install an appropriate version"
+    ) from e
+from packaging import version
 
 # ─────────────────────────────────────────────────────────────
 # 2. Global State & Constants (mutable ones are initialised later)
@@ -75,7 +82,12 @@ DEFAULT_CACHE = str(Path.home() / ".cache" / "huggingface" / "hub")
 CACHE_PATH = Path(CONFIG.get("cache_path", DEFAULT_CACHE)).expanduser()
 CACHE_PATH.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(CACHE_PATH))
-os.environ.setdefault("TRANSFORMERS_CACHE", str(CACHE_PATH))
+os.environ.setdefault("HF_HOME", str(CACHE_PATH))
+MIN_TORCH = version.parse("2.6")
+if version.parse(torch.__version__.split("+")[0]) < MIN_TORCH:
+    raise RuntimeError(
+        f"PyTorch {MIN_TORCH} or newer is required; found {torch.__version__}"
+    )
 _REPO_MAP = CONFIG["MODEL_REPO_MAP"]
 TRANSLATE_MODEL_MAP = {
     tuple(k.split("-")): v for k, v in CONFIG["TRANSLATE_REPO_MAP"].items()
