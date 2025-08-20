@@ -48,6 +48,7 @@ else:  # Fallback for builds without qRegisterMetaType
 
 import os
 import urllib.request
+import re
 import sounddevice as sd
 import signal
 import threading
@@ -107,24 +108,33 @@ def list_gpus():
     except Exception:
         return []
 
+def available_cuda_tags(max_driver: int | None = None):
+    try:
+        with urllib.request.urlopen("https://download.pytorch.org/whl/") as resp:
+            html = resp.read().decode("utf-8")
+        tags = sorted(
+            {m.group(1) for m in re.finditer(r"href=['\"](cu\d+)/['\"]", html)},
+            reverse=True,
+        )
+        if max_driver is not None:
+            tags = [t for t in tags if int(t[2:]) <= max_driver]
+        return tags
+    except Exception:
+        if max_driver is None:
+            max_driver = 123
+        return [f"cu{i}" for i in range(max_driver, 109, -1)]
+
+
 def recommend_cuda_version(driver_version):
     try:
         major = int(driver_version.split(".")[0])
-        if major >= 535:
-            primary = "cu123"
-        elif major >= 525:
-            primary = "cu121"
-        else:
-            primary = "cu118"
-    except:
+        max_driver = max(118, major - 390)
+    except Exception:
         return "cpu"
 
-    # 驗證該 CUDA wheel 是否存在，否則降級
-    if torch_wheel_exists(primary):
-        return primary
-    for fallback in ["cu121", "cu118", "cpu"]:
-        if torch_wheel_exists(fallback):
-            return fallback
+    for tag in available_cuda_tags(max_driver):
+        if torch_wheel_exists(tag):
+            return tag
     return "cpu"
 
 # ──────────── 套件檢查 ────────────
