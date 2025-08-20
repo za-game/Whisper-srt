@@ -5,7 +5,7 @@ Whisper Live Caption – EXE 發佈專用啟動器
 ========================================
 功能：
 1. 啟動時偵測 GPU 與驅動版本
-2. 推算最適 CUDA runtime (cu123 / cu121 / cu118 / cpu)
+2. 推算最適 CUDA runtime (自動選擇最新 cuXX 或 cpu)
 3. 檢查必要套件 (torch, faster-whisper, PyQt5 等)
 4. 缺少時 GUI 詢問並安裝
 5. 完成後啟動 mWhisperSub.py，並在本程式內建字幕 Overlay + 系統匣設定
@@ -100,16 +100,20 @@ def list_audio_devices():
 # ──────────── GPU 偵測 ────────────
 def detect_gpu():
     if not shutil.which("nvidia-smi"):
-        return None, None
+        return None, None, None
     try:
         out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
-            encoding="utf-8"
+            [
+                "nvidia-smi",
+                "--query-gpu=name,driver_version,cuda_version",
+                "--format=csv,noheader",
+            ],
+            encoding="utf-8",
         ).strip().split("\n")[0]
-        name, driver = [x.strip() for x in out.split(",")]
-        return name, driver
+        name, driver, cuda = [x.strip() for x in out.split(",")]
+        return name, driver, cuda
     except Exception:
-        return None, None
+        return None, None, None
 
 def list_gpus():
     if not shutil.which("nvidia-smi"):
@@ -123,36 +127,37 @@ def list_gpus():
     except Exception:
         return []
 
-def recommend_cuda_version(driver_version):
+def available_cuda_tags():
     try:
-        major = int(driver_version.split(".")[0])
-        if major >= 535:
-            primary = "cu123"
-        elif major >= 525:
-            primary = "cu121"
-        else:
-            primary = "cu118"
-    except:
+        with urllib.request.urlopen(
+            "https://download.pytorch.org/whl/torch_stable.html"
+        ) as resp:
+            html = resp.read().decode("utf-8", "ignore")
+        tags = {
+            m.group(0) for m in re.finditer(r"cu\d{3}", html)
+        }
+        return sorted(tags, key=lambda x: int(x[2:]), reverse=True)
+    except Exception:
+        return ["cu123", "cu121", "cu118"]
+
+
+def recommend_cuda_version(cuda_version):
+    try:
+        max_cuda = int(cuda_version.replace(".", ""))
+    except Exception:
         return "cpu"
-
-    # 驗證該 CUDA wheel 是否存在，否則降級
-    if torch_wheel_exists(primary):
-        return primary
-    for fallback in ["cu121", "cu118", "cpu"]:
-        if torch_wheel_exists(fallback):
-            return fallback
+    for tag in available_cuda_tags():
+        try:
+            tag_num = int(tag[2:])
+        except ValueError:
+            continue
+        if tag_num <= max_cuda:
+            latest = latest_torch_version(tag)
+            if latest and version.parse(latest) >= MIN_TORCH:
+                return tag
     return "cpu"
-
+    
 # ──────────── 套件檢查 ────────────
-def torch_wheel_exists(cuda_tag):
-    try:
-        url = f"https://download.pytorch.org/whl/{cuda_tag}/torch/"
-        with urllib.request.urlopen(url) as resp:
-            return resp.status == 200
-    except:
-        return False
-
-
 def latest_torch_version(cuda_tag):
     py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
     if sys.platform.startswith("win"):
@@ -1207,14 +1212,16 @@ class BootstrapWin(QtWidgets.QMainWindow):
         if not self.hotwords_edit.text().strip() and not self.srt_edit.text().strip():
             self.append_log("此資料夾內未找到 .txt 或 .srt，請手動選擇。")
     def check_env(self):
-        gpu_name, driver_ver = detect_gpu()
+        gpu_name, driver_ver, cuda_ver = detect_gpu()
         self.refresh_gpu_list()
-        if gpu_name:
-            cuda_tag = recommend_cuda_version(driver_ver)
+        if gpu_name and cuda_ver:
+            cuda_tag = recommend_cuda_version(cuda_ver)
             self.cuda_tag = cuda_tag
             self.gpu_label.setText(f"GPU: {gpu_name}")
             self.driver_label.setText(f"驅動版本: {driver_ver}")
-            self.append_log(f"偵測到 GPU: {gpu_name} | 驅動: {driver_ver} | 推薦 CUDA: {cuda_tag}")
+            self.append_log(
+                f"偵測到 GPU: {gpu_name} | 驅動: {driver_ver} | 推薦 CUDA: {cuda_tag}"
+            )
         else:
             self.cuda_tag = "cpu"
             self.gpu_label.setText("GPU: 無")
@@ -1298,8 +1305,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
     def install_torch_cuda(self):
         try:
-            gpu_name, driver_ver = detect_gpu()
-            cuda_tag = recommend_cuda_version(driver_ver) if gpu_name else "cpu"
+            gpu_name, driver_ver, cuda_ver = detect_gpu()
+            cuda_tag = recommend_cuda_version(cuda_ver) if gpu_name else "cpu"
             torch_ver = latest_torch_version(cuda_tag)
             self.cuda_tag = cuda_tag
             info = torch_ver or "latest"
