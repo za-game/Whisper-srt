@@ -20,3 +20,17 @@ Whisper-srt 是一個利用 OpenAI Whisper 將音訊即時轉換成字幕並於�
 
 ## 設定
 所有設定會儲存在系統的 `QSettings` 中，下次啟動時會自動套用。
+
+## 翻譯模型
+程式可選擇性地使用 Transformers 模型進行翻譯。預設以英文為中介，必要時會自動下載所需模型：
+
+- 英文 ↔ 日文：`Helsinki-NLP/opus-mt-en-ja`
+- 英文 ↔ 韓文：`Helsinki-NLP/opus-mt-en-ko`
+- 英文 ↔ 中文：`Helsinki-NLP/opus-mt-en-zh`
+
+針對日文、韓文與中文之間無英文中介的翻譯，會退回多語模型：
+
+- 日文 ↔ 韓文、日文 ↔ 中文：`facebook/m2m100_418M`（語言代碼 `ja`、`ko`、`zh`）
+- 中文 ↔ 韓文：`facebook/nllb-200-distilled-600M`（語言代碼 `jpn_Jpan`、`kor_Hang`、`zho_Hans`）
+
+如模型需要 Hugging Face 認證，程式會提示輸入 token，可先於終端機執行 `huggingface-cli login`。

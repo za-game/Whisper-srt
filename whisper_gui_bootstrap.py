@@ -67,6 +67,21 @@ MODEL_REPO_MAP = {
     "large-v2": "Systran/faster-whisper-large-v2",
 }
 
+TRANSLATE_REPO_MAP = {
+    ("en", "ja"): "Helsinki-NLP/opus-mt-en-ja",
+    ("en", "ko"): "Helsinki-NLP/opus-mt-en-ko",
+    ("en", "zh"): "Helsinki-NLP/opus-mt-en-zh",
+    ("ja", "en"): "Helsinki-NLP/opus-mt-ja-en",
+    ("ko", "en"): "Helsinki-NLP/opus-mt-ko-en",
+    ("zh", "en"): "Helsinki-NLP/opus-mt-zh-en",
+    ("ja", "ko"): "facebook/m2m100_418M",
+    ("ko", "ja"): "facebook/m2m100_418M",
+    ("ja", "zh"): "facebook/m2m100_418M",
+    ("zh", "ja"): "facebook/m2m100_418M",
+    ("zh", "ko"): "facebook/nllb-200-distilled-600M",
+    ("ko", "zh"): "facebook/nllb-200-distilled-600M",
+}
+
 # ──────────── 錄音設備偵測 ────────────
 def list_audio_devices():
     devices = []
