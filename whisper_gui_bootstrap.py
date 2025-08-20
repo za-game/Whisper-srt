@@ -581,9 +581,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
             except HfHubHTTPError as e:
                 if getattr(getattr(e, "response", None), "status_code", None) == 404:
                     continue
-                return True
             except Exception:
-                return True
+                continue
         return False
 
     def _on_lang_changed(self, idx: int):
