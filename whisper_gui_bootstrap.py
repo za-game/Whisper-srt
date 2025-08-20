@@ -652,7 +652,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         self._last_model_index = self.model_combo.currentIndex()
         self._refresh_model_items()
-        QtCore.QTimer.singleShot(100, self.check_env)
         # project autosave
         self._autosave_timer = QtCore.QTimer(self)
         self._autosave_timer.setSingleShot(True)
@@ -1500,7 +1499,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self._ui_log("解除安裝完成")
         except Exception as e:
             self._ui_log(f"解除安裝失敗: {e}")
-        self.check_env()
 
     def install_torch_cuda(self):
         try:
@@ -1569,7 +1567,6 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 )
         except Exception as e:
             self._ui_log(f"安裝失敗: {e}")
-        self.check_env()
 
     def _download_model_with_progress(self, repo_id: str):
         """
