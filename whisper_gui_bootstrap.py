@@ -73,6 +73,7 @@ CACHE_DEFAULT = str(Path.home() / ".cache" / "huggingface" / "hub")
 CACHE_PATH = Path(CONFIG.get("cache_path", CACHE_DEFAULT)).expanduser().resolve()
 CACHE_PATH.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(CACHE_PATH))
+os.environ.setdefault("TRANSFORMERS_CACHE", str(CACHE_PATH))
 
 CUDA_TAGS = ("cu126", "cu124", "cu121")
 FORCE_CUDA = os.getenv("FORCE_CUDA") == "1"
