@@ -239,8 +239,16 @@ def _probe_torch_with_backoff(
     return None, None
 
 
-def recommend_cuda_version(cuda_version: str | None, log_fn=None):
-    for tag in _candidate_cuda_tags(cuda_version):
+def recommend_cuda_version(
+    cuda_version: str | None, log_fn=None, probe: bool = True
+):
+    tags = _candidate_cuda_tags(cuda_version)
+    if not probe:
+        for tag in tags:
+            if tag != "cpu":
+                return tag, None, None
+        return "cpu", None, "https://download.pytorch.org/whl/cpu"
+    for tag in tags:
         if tag == "cpu":
             continue
         ver, index_url = _probe_torch_with_backoff(tag, log_fn=log_fn)
@@ -255,7 +263,7 @@ def recommend_cuda_version(cuda_version: str | None, log_fn=None):
 
 def _gather_env() -> dict:
     gpu_name, driver_ver, cuda_ver = detect_gpu()
-    rec_tag, _, _ = recommend_cuda_version(cuda_ver)
+    rec_tag, _, _ = recommend_cuda_version(cuda_ver, probe=False)
     torch_ver = _torch_version()
     torch_ok = torch_ver is not None
     fw_ok = is_installed("faster_whisper")
