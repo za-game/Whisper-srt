@@ -264,7 +264,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.translate_chk = QtWidgets.QCheckBox("翻譯")
         self.translate_lang_combo = QtWidgets.QComboBox()
         self.translate_lang_combo.setEnabled(False)
-        self.translate_chk.toggled.connect(self.translate_lang_combo.setEnabled)
+        self.translate_chk.toggled.connect(self._on_translate_toggled)
         self.translate_lang_combo.currentIndexChanged.connect(self._on_translate_lang_changed)
         self.lang_combo.currentIndexChanged.connect(self._on_lang_changed)
         # 翻譯語言僅在勾選翻譯時生效
@@ -510,12 +510,14 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     break
         self._last_translate_index = self.translate_lang_combo.currentIndex()
         # —— 統一的本地模型資料夾：hf_models/<Repo> —— #
-    def _repo_local_dir(self, repo_id: str) -> Path:
-        d = (ROOT_DIR / "hf_models" / repo_id.replace("/", "--"))
-        try:
-            d.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
+
+    def _repo_local_dir(self, repo_id: str, ensure: bool = False) -> Path:
+        d = ROOT_DIR / "hf_models" / repo_id.replace("/", "--")
+        if ensure:
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
         return d
 
     def _model_downloaded(self, name: str) -> bool:
@@ -632,6 +634,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
         else:
             model.setData(model.index(0, 0), 1, QtCore.Qt.UserRole - 1)
             self.translate_lang_combo.setCurrentIndex(0)
+
+    def _on_translate_toggled(self, checked: bool):
+        self.translate_lang_combo.setEnabled(checked)
+        self._refresh_translate_items()
+        self._update_translate_default()
+        self._last_translate_index = self.translate_lang_combo.currentIndex()
 
     def _download_translate_model(self, pair: tuple[str, str]) -> bool:
         repos = TRANSLATE_REPO_MAP.get(pair, [])
@@ -1371,6 +1379,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         cancelled = {"flag": False}
         result = {"error": None}  # None=成功, "cancelled"=使用者取消, 其他=錯誤訊息
+        local_dir: Path | None = None
 
         class QtTqdm(tqdm.tqdm):
             """最簡做法：以 0–100% 顯示目前這條下載列"""
@@ -1413,9 +1422,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     )
 
         def worker():
+            nonlocal local_dir
             try:
                 if use_local_dir:
-                    local_dir = self._repo_local_dir(repo_id)
+                    local_dir = self._repo_local_dir(repo_id, ensure=True)
                     QtCore.QMetaObject.invokeMethod(
                         self, "append_log", QtCore.Qt.QueuedConnection,
                         QtCore.Q_ARG(str, f"下載到本地模型資料夾：{local_dir}")
@@ -1424,6 +1434,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                         repo_id=repo_id,
                         repo_type="model",
                         local_dir=str(local_dir),
+                        local_dir_use_symlinks=False,
                         tqdm_class=QtTqdm,
                     )
                 else:
@@ -1459,8 +1470,18 @@ class BootstrapWin(QtWidgets.QMainWindow):
             QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 100)
         # 只有在 worker 回報「真正取消」或錯誤時才丟例外
         if result["error"] == "cancelled":
+            if use_local_dir and local_dir and local_dir.exists() and not any(local_dir.iterdir()):
+                try:
+                    local_dir.rmdir()
+                except Exception:
+                    pass
             raise RuntimeError("使用者取消下載")
         elif result["error"]:
+            if use_local_dir and local_dir and local_dir.exists() and not any(local_dir.iterdir()):
+                try:
+                    local_dir.rmdir()
+                except Exception:
+                    pass
             raise RuntimeError(result["error"])
         # 成功：把進度條補滿並提示完成
         self.append_log("模型檢查/下載完成。")

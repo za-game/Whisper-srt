@@ -47,12 +47,14 @@ from huggingface_hub import login as hf_login
 
 ROOT_DIR = Path(__file__).resolve().parent
 
-def _repo_local_dir(repo_id: str) -> Path:
+
+def _repo_local_dir(repo_id: str, ensure: bool = False) -> Path:
     d = ROOT_DIR / "hf_models" / repo_id.replace("/", "--")
-    try:
-        d.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+    if ensure:
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
     return d
 
 # 翻譯模型對應表（來源語言, 目標語言 -> HF Repo ID 清單）
