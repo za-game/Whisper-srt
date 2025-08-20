@@ -63,8 +63,10 @@ with (ROOT_DIR / "Config.json").open(encoding="utf-8") as f:
     CONFIG = json.load(f)
 MODEL_PATH = (ROOT_DIR / CONFIG.get("model_path", "models")).resolve()
 MODEL_PATH.mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(MODEL_PATH))
-os.environ.setdefault("TRANSFORMERS_CACHE", str(MODEL_PATH))
+HF_CACHE = MODEL_PATH / "hf_cache"
+HF_CACHE.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(HF_CACHE))
+os.environ.setdefault("TRANSFORMERS_CACHE", str(HF_CACHE))
 MODEL_REPO_MAP = CONFIG["MODEL_REPO_MAP"]
 TRANSLATE_REPO_MAP = {
     tuple(k.split("-")): v for k, v in CONFIG["TRANSLATE_REPO_MAP"].items()
@@ -1272,6 +1274,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     repo_id=repo_id,
                     repo_type="model",
                     local_dir=str(local_dir),   # 新版 hub: 指定 local_dir 即為實體檔，無 symlink
+                    cache_dir=str(HF_CACHE),
                     tqdm_class=QtTqdm,
                 )
             except RuntimeError as e:

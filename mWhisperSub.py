@@ -71,8 +71,10 @@ ROOT_DIR = Path(__file__).resolve().parent
 CONFIG = json.loads((ROOT_DIR / "Config.json").read_text(encoding="utf-8"))
 MODEL_PATH = ROOT_DIR / CONFIG.get("model_path", "models")
 MODEL_PATH.mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(MODEL_PATH))
-os.environ.setdefault("TRANSFORMERS_CACHE", str(MODEL_PATH))
+HF_CACHE = MODEL_PATH / "hf_cache"
+HF_CACHE.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(HF_CACHE))
+os.environ.setdefault("TRANSFORMERS_CACHE", str(HF_CACHE))
 _REPO_MAP = CONFIG["MODEL_REPO_MAP"]
 TRANSLATE_MODEL_MAP = {
     tuple(k.split("-")): v for k, v in CONFIG["TRANSLATE_REPO_MAP"].items()
@@ -358,9 +360,12 @@ def _load_translate_pipe(src: str, tgt: str):
             nllb = {"ja": "jpn_Jpan", "ko": "kor_Hang", "zh": "zho_Hans"}
             kwargs["src_lang"] = nllb[src]
             kwargs["tgt_lang"] = nllb[tgt]
+        local = MODEL_PATH / model.replace("/", "--")
+        if local.is_dir():
+            model = str(local)
         while True:
             try:
-                pipe = pipeline("translation", model=model, cache_dir=str(MODEL_PATH), **kwargs)
+                pipe = pipeline("translation", model=model, cache_dir=str(HF_CACHE), **kwargs)
                 break
             except Exception as exc:  # pragma: no cover - runtime dependency
                 err = str(exc)
