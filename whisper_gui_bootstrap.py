@@ -145,7 +145,9 @@ def recommend_cuda_version(cuda_version):
     try:
         max_cuda = int(cuda_version.replace(".", ""))
     except Exception:
-        return "cpu"
+        max_cuda = 0
+    best_tag: Optional[str] = None
+    best_ver: Optional[str] = None
     for tag in available_cuda_tags():
         try:
             tag_num = int(tag[2:])
@@ -154,8 +156,12 @@ def recommend_cuda_version(cuda_version):
         if tag_num <= max_cuda:
             latest = latest_torch_version(tag)
             if latest and version.parse(latest) >= MIN_TORCH:
-                return tag
-    return "cpu"
+                if not best_ver or version.parse(latest) > version.parse(best_ver):
+                    best_tag, best_ver = tag, latest
+    if best_tag:
+        return best_tag, best_ver
+    cpu_ver = latest_torch_version("cpu")
+    return "cpu", cpu_ver
     
 # ──────────── 套件檢查 ────────────
 def latest_torch_version(cuda_tag):
@@ -1215,7 +1221,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         gpu_name, driver_ver, cuda_ver = detect_gpu()
         self.refresh_gpu_list()
         if gpu_name and cuda_ver:
-            cuda_tag = recommend_cuda_version(cuda_ver)
+            cuda_tag, _ = recommend_cuda_version(cuda_ver)
             self.cuda_tag = cuda_tag
             self.gpu_label.setText(f"GPU: {gpu_name}")
             self.driver_label.setText(f"驅動版本: {driver_ver}")
@@ -1306,8 +1312,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
     def install_torch_cuda(self):
         try:
             gpu_name, driver_ver, cuda_ver = detect_gpu()
-            cuda_tag = recommend_cuda_version(cuda_ver) if gpu_name else "cpu"
-            torch_ver = latest_torch_version(cuda_tag)
+            cuda_tag, torch_ver = recommend_cuda_version(cuda_ver) if gpu_name else ("cpu", latest_torch_version("cpu"))
             self.cuda_tag = cuda_tag
             info = torch_ver or "latest"
             self.append_log(
