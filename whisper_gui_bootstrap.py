@@ -1795,6 +1795,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         QtWidgets.QApplication.quit()
 
     def _ui_log(self, text: str):
+        print(text, flush=True)
         QtCore.QMetaObject.invokeMethod(
             self, "append_log", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, text)
         )
