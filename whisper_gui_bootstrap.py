@@ -172,6 +172,56 @@ def recommend_cuda_version(cuda_version: str | None):
             return tag, ver
     return "cpu", None
 
+
+def _gather_env() -> dict:
+    gpu_name, driver_ver, cuda_ver = detect_gpu()
+    rec_tag, _ = (
+        recommend_cuda_version(cuda_ver)
+        if cuda_ver
+        else ("cpu", _probe_torch("cpu"))
+    )
+    torch_ver = _torch_version()
+    torch_ok = torch_ver is not None and is_installed("faster_whisper")
+    installed_tag = None
+    cuda_tag = rec_tag
+    if torch_ver:
+        try:
+            import torch  # type: ignore
+
+            state = torch.__version__
+            if torch.cuda.is_available() and torch.version.cuda:
+                installed_tag = f"cu{torch.version.cuda.replace('.', '')}"
+                cuda_tag = installed_tag
+                if not gpu_name:
+                    gpu_name = torch.cuda.get_device_name(0)
+            else:
+                cuda_tag = rec_tag
+        except Exception:
+            state = str(torch_ver)
+            cuda_tag = rec_tag
+        if torch_ver < MIN_TORCH:
+            state += f" (需升級至 {MIN_TORCH})"
+    else:
+        state = "未安裝"
+    return {
+        "gpu_name": gpu_name,
+        "driver_ver": driver_ver,
+        "rec_tag": rec_tag,
+        "torch_ver": torch_ver,
+        "torch_ok": torch_ok,
+        "installed_tag": installed_tag,
+        "state": state,
+        "cuda_tag": cuda_tag,
+    }
+
+
+class EnvWorker(QtCore.QThread):
+    result = QtCore.pyqtSignal(dict)
+
+    def run(self) -> None:  # type: ignore[override]
+        info = _gather_env()
+        self.result.emit(info)
+
 def is_installed(pkg):
     return importlib.util.find_spec(pkg) is not None
 
@@ -1208,32 +1258,28 @@ class BootstrapWin(QtWidgets.QMainWindow):
         if not self.hotwords_edit.text().strip() and not self.srt_edit.text().strip():
             self.append_log("此資料夾內未找到 .txt 或 .srt，請手動選擇。")
     def check_env(self):
-        gpu_name, driver_ver, cuda_ver = detect_gpu()
+        if getattr(self, "_env_worker", None) and self._env_worker.isRunning():
+            return
         self.refresh_gpu_list()
-        rec_tag, _ = recommend_cuda_version(cuda_ver) if cuda_ver else ("cpu", _probe_torch("cpu"))
-        torch_ver = _torch_version()
-        torch_ok = torch_ver is not None and is_installed("faster_whisper")
-        installed_tag = None
-        if torch_ver:
-            try:
-                import torch  # type: ignore
+        self.pkg_label.setText("torch/CUDA: 檢查中…")
+        self.gpu_label.setText("GPU: 檢查中…")
+        self.driver_label.setText("驅動版本: 檢查中…")
+        self.append_log("檢查環境中…")
+        self._env_worker = EnvWorker()
+        self._env_worker.result.connect(self._apply_env)
+        self._env_worker.finished.connect(lambda: setattr(self, "_env_worker", None))
+        self._env_worker.start()
 
-                state = torch.__version__
-                if torch.cuda.is_available() and torch.version.cuda:
-                    installed_tag = f"cu{torch.version.cuda.replace('.', '')}"
-                    self.cuda_tag = installed_tag
-                    if not gpu_name:
-                        gpu_name = torch.cuda.get_device_name(0)
-                else:
-                    self.cuda_tag = rec_tag
-            except Exception:
-                state = str(torch_ver)
-                self.cuda_tag = rec_tag
-            if torch_ver < MIN_TORCH:
-                state += f" (需升級至 {MIN_TORCH})"
-        else:
-            state = "未安裝"
-            self.cuda_tag = rec_tag
+    @QtCore.pyqtSlot(dict)
+    def _apply_env(self, info: dict):
+        gpu_name = info["gpu_name"]
+        driver_ver = info["driver_ver"]
+        rec_tag = info["rec_tag"]
+        torch_ver = info["torch_ver"]
+        torch_ok = info["torch_ok"]
+        installed_tag = info["installed_tag"]
+        state = info["state"]
+        self.cuda_tag = info["cuda_tag"]
 
         if not gpu_name:
             self.gpu_label.setText("GPU: 無")
