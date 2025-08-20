@@ -532,31 +532,35 @@ class BootstrapWin(QtWidgets.QMainWindow):
         return False
 
     def _refresh_model_items(self):
-        model = self.model_combo.model()
-        available_names: list[str] = []
-        for i in range(self.model_combo.count()):
-            base = self.model_combo.itemData(i)
-            if not base:
-                continue
-            available = self._model_downloaded(base)
-            text = base if available else f"{base} (未下載)"
-            self.model_combo.setItemText(i, text)
-            brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
-            model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
-            if available:
-                available_names.append(base)
-        placeholder_idx = self.model_combo.findData("")
-        if available_names:
-            if placeholder_idx != -1:
-                self.model_combo.removeItem(placeholder_idx)
-            current_name = self.model_combo.currentData()
-            if not current_name or not self._model_downloaded(current_name):
-                self.model_combo.setCurrentIndex(self.model_combo.findData(available_names[0]))
-        else:
-            if placeholder_idx == -1:
-                self.model_combo.insertItem(0, "未選擇", "")
-                placeholder_idx = 0
-            self.model_combo.setCurrentIndex(placeholder_idx)
+        self.model_combo.blockSignals(True)
+        try:
+            model = self.model_combo.model()
+            available_names: list[str] = []
+            for i in range(self.model_combo.count()):
+                base = self.model_combo.itemData(i)
+                if not base:
+                    continue
+                available = self._model_downloaded(base)
+                text = base if available else f"{base} (未下載)"
+                self.model_combo.setItemText(i, text)
+                brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
+                model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
+                if available:
+                    available_names.append(base)
+            placeholder_idx = self.model_combo.findData("")
+            if available_names:
+                if placeholder_idx != -1:
+                    self.model_combo.removeItem(placeholder_idx)
+                current_name = self.model_combo.currentData()
+                if not current_name or not self._model_downloaded(current_name):
+                    self.model_combo.setCurrentIndex(self.model_combo.findData(available_names[0]))
+            else:
+                if placeholder_idx == -1:
+                    self.model_combo.insertItem(0, "未選擇", "")
+                    placeholder_idx = 0
+                self.model_combo.setCurrentIndex(placeholder_idx)
+        finally:
+            self.model_combo.blockSignals(False)
         self._last_model_index = self.model_combo.currentIndex()
 
     def _set_model_name(self, name: str):
