@@ -53,12 +53,6 @@ import signal
 import threading
 import tqdm
 import numpy as np
-try:
-    import torch
-except Exception as e:  # pragma: no cover - informative error
-    raise RuntimeError(
-        "PyTorch 2.6 or newer is required; please install an appropriate version"
-    ) from e
 from packaging import version
 from overlay import Settings, SubtitleOverlay, Tray
 from srt_utils import LiveSRTWatcher
@@ -76,10 +70,12 @@ CACHE_PATH.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(CACHE_PATH))
 os.environ.setdefault("HF_HOME", str(CACHE_PATH))
 MIN_TORCH = version.parse("2.6")
-if version.parse(torch.__version__.split("+")[0]) < MIN_TORCH:
-    raise RuntimeError(
-        f"PyTorch {MIN_TORCH} or newer is required; found {torch.__version__}"
-    )
+def _torch_version():
+    try:
+        import torch  # type: ignore
+        return version.parse(torch.__version__.split("+")[0])
+    except Exception:
+        return None
 MODEL_REPO_MAP = CONFIG["MODEL_REPO_MAP"]
 TRANSLATE_REPO_MAP = {
     tuple(k.split("-")): v for k, v in CONFIG["TRANSLATE_REPO_MAP"].items()
@@ -506,13 +502,21 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.translate_lang_combo.clear()
         model = self.translate_lang_combo.model()
         available_items: list[tuple[int, str]] = []
+        torch_ver = _torch_version()
         for i, code in enumerate(opts):
             pair = (src.lower(), code.lower())
             repo = TRANSLATE_REPO_MAP.get(pair)
             available = True
+            suffix = ""
             if repo:
-                available = self._translate_model_downloaded(repo)
-            text = code if available else f"{code} (未下載)"
+                downloaded = self._translate_model_downloaded(repo)
+                if not downloaded:
+                    available = False
+                    suffix = " (未下載)"
+                elif repo.startswith("facebook/") and (not torch_ver or torch_ver < MIN_TORCH):
+                    available = False
+                    suffix = " (請升級Torch)"
+            text = f"{code}{suffix}"
             self.translate_lang_combo.addItem(text, code)
             brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
             model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
@@ -627,24 +631,36 @@ class BootstrapWin(QtWidgets.QMainWindow):
             return
         src = self.lang_combo.currentText().lower()
         repo = TRANSLATE_REPO_MAP.get((src, tgt.lower()))
-        if repo and not self._translate_model_downloaded(repo):
-            resp = QtWidgets.QMessageBox.question(
-                self,
-                "下載模型",
-                f"翻譯模型 {repo} 未下載，現在下載嗎？",
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-            )
-            if resp == QtWidgets.QMessageBox.Yes:
-                try:
-                    self._download_model_with_progress(repo)
-                except Exception as e:
-                    QtWidgets.QMessageBox.warning(self, "下載失敗", str(e))
-                self._update_translate_lang_options()
-            else:
+        if repo:
+            torch_ver = _torch_version()
+            if repo.startswith("facebook/") and (not torch_ver or torch_ver < MIN_TORCH):
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "版本過低",
+                    f"翻譯模型 {repo} 需要 PyTorch {MIN_TORCH}+，請升級 Torch",
+                )
                 self.translate_lang_combo.blockSignals(True)
                 self.translate_lang_combo.setCurrentIndex(self._last_trans_index)
                 self.translate_lang_combo.blockSignals(False)
                 return
+            if not self._translate_model_downloaded(repo):
+                resp = QtWidgets.QMessageBox.question(
+                    self,
+                    "下載模型",
+                    f"翻譯模型 {repo} 未下載，現在下載嗎？",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                )
+                if resp == QtWidgets.QMessageBox.Yes:
+                    try:
+                        self._download_model_with_progress(repo)
+                    except Exception as e:
+                        QtWidgets.QMessageBox.warning(self, "下載失敗", str(e))
+                    self._update_translate_lang_options()
+                else:
+                    self.translate_lang_combo.blockSignals(True)
+                    self.translate_lang_combo.setCurrentIndex(self._last_trans_index)
+                    self.translate_lang_combo.blockSignals(False)
+                    return
         self._last_trans_index = idx
     def closeEvent(self, ev: QtGui.QCloseEvent):
         ev.ignore()
@@ -1130,12 +1146,18 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.driver_label.setText("驅動版本: 無")
             self.append_log("未偵測到 NVIDIA GPU，將使用 CPU 模式")
 
-        torch_ok = is_installed("torch") and is_installed("faster_whisper")
+        torch_ver = _torch_version()
+        torch_ok = torch_ver is not None and is_installed("faster_whisper")
         state = "已安裝" if torch_ok else "未安裝"
+        if torch_ver and torch_ver < MIN_TORCH:
+            state += f" (需升級至 {MIN_TORCH})"
         self.pkg_label.setText(f"torch/CUDA: {state} (推薦 {self.cuda_tag})")
         self._update_cuda_option(torch_ok and self.cuda_tag != "cpu")
         if torch_ok:
-            self.append_log("環境已安裝，可直接啟動。")
+            if torch_ver and torch_ver < MIN_TORCH:
+                self.append_log(f"PyTorch 版本過低，翻譯模型需 {MIN_TORCH}+。")
+            else:
+                self.append_log("環境已安裝，可直接啟動。")
         else:
             self.append_log("需要安裝相應套件。")
 

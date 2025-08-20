@@ -84,10 +84,6 @@ CACHE_PATH.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(CACHE_PATH))
 os.environ.setdefault("HF_HOME", str(CACHE_PATH))
 MIN_TORCH = version.parse("2.6")
-if version.parse(torch.__version__.split("+")[0]) < MIN_TORCH:
-    raise RuntimeError(
-        f"PyTorch {MIN_TORCH} or newer is required; found {torch.__version__}"
-    )
 _REPO_MAP = CONFIG["MODEL_REPO_MAP"]
 TRANSLATE_MODEL_MAP = {
     tuple(k.split("-")): v for k, v in CONFIG["TRANSLATE_REPO_MAP"].items()
@@ -364,6 +360,15 @@ def _load_translate_pipe(src: str, tgt: str):
     if pipe is None:
         model = TRANSLATE_MODEL_MAP.get(pair)
         if model is None:
+            return None
+        if model.startswith("facebook/") and version.parse(torch.__version__.split("+")[0]) < MIN_TORCH:
+            log.warning(
+                "translation model %s requires PyTorch %s+; found %s",
+                model,
+                MIN_TORCH,
+                torch.__version__,
+            )
+            _translate_pipes[pair] = None
             return None
         kwargs = {}
         if model.startswith("facebook/m2m100"):
