@@ -206,6 +206,8 @@ logging.basicConfig(level=log_lvl,
                     format="%(asctime)s %(levelname)s: %(message)s",
                     datefmt="%H:%M:%S")
 log = logging.getLogger("whisper")
+logging.getLogger("huggingface_hub").setLevel(logging.INFO)
+logging.getLogger("filelock").setLevel(logging.INFO)
 
 csv_fp = None
 csv_writer: csv.writer | None = None
