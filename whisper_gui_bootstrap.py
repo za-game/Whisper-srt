@@ -138,7 +138,7 @@ def available_cuda_tags():
         }
         return sorted(tags, key=lambda x: int(x[2:]), reverse=True)
     except Exception:
-        return ["cu123", "cu121", "cu118"]
+        return [f"cu{n}" for n in range(126, 117, -1)]
 
 
 def recommend_cuda_version(cuda_version):
@@ -155,9 +155,12 @@ def recommend_cuda_version(cuda_version):
             continue
         if tag_num <= max_cuda:
             latest = latest_torch_version(tag)
-            if latest and version.parse(latest) >= MIN_TORCH:
-                if not best_ver or version.parse(latest) > version.parse(best_ver):
-                    best_tag, best_ver = tag, latest
+            if latest:
+                if version.parse(latest) >= MIN_TORCH:
+                    if not best_ver or version.parse(latest) > version.parse(best_ver):
+                        best_tag, best_ver = tag, latest
+            elif best_tag is None:
+                best_tag, best_ver = tag, None
     if best_tag:
         return best_tag, best_ver
     cpu_ver = latest_torch_version("cpu")
