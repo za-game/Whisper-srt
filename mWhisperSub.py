@@ -72,6 +72,8 @@ CONFIG = json.loads((ROOT_DIR / "Config.json").read_text(encoding="utf-8"))
 MODEL_PATH = ROOT_DIR / CONFIG.get("model_path", "models")
 MODEL_PATH.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("HF_HOME", str(MODEL_PATH))
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(MODEL_PATH))
+os.environ.setdefault("TRANSFORMERS_CACHE", str(MODEL_PATH))
 _REPO_MAP = CONFIG["MODEL_REPO_MAP"]
 TRANSLATE_MODEL_MAP = {
     tuple(k.split("-")): v for k, v in CONFIG["TRANSLATE_REPO_MAP"].items()

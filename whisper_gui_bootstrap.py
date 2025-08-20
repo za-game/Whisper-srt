@@ -64,6 +64,8 @@ with (ROOT_DIR / "Config.json").open(encoding="utf-8") as f:
 MODEL_PATH = (ROOT_DIR / CONFIG.get("model_path", "models")).resolve()
 MODEL_PATH.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("HF_HOME", str(MODEL_PATH))
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(MODEL_PATH))
+os.environ.setdefault("TRANSFORMERS_CACHE", str(MODEL_PATH))
 MODEL_REPO_MAP = CONFIG["MODEL_REPO_MAP"]
 TRANSLATE_REPO_MAP = {
     tuple(k.split("-")): v for k, v in CONFIG["TRANSLATE_REPO_MAP"].items()
@@ -509,22 +511,24 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self._last_trans_index = self.translate_lang_combo.currentIndex()
 
     def _model_downloaded(self, name: str) -> bool:
-        local_dir = ROOT_DIR / "models" / name
         repo = MODEL_REPO_MAP.get(name, name)
-        hf_dir = MODEL_PATH / repo.replace("/", "--")
-        if local_dir.exists() and any(local_dir.iterdir()):
-            return True
-        if hf_dir.exists() and any(hf_dir.iterdir()):
-            return True
+        paths = [
+            MODEL_PATH / name,
+            MODEL_PATH / repo.replace("/", "--"),
+        ]
+        for p in paths:
+            if p.exists() and any(p.iterdir()):
+                return True
         return False
 
     def _translate_model_downloaded(self, repo: str) -> bool:
-        local_dir = ROOT_DIR / "models" / repo.replace("/", "--")
-        hf_dir = MODEL_PATH / repo.replace("/", "--")
-        if local_dir.exists() and any(local_dir.iterdir()):
-            return True
-        if hf_dir.exists() and any(hf_dir.iterdir()):
-            return True
+        paths = [
+            MODEL_PATH / repo,
+            MODEL_PATH / repo.replace("/", "--"),
+        ]
+        for p in paths:
+            if p.exists() and any(p.iterdir()):
+                return True
         return False
 
     def _refresh_model_items(self):
@@ -1315,19 +1319,17 @@ class BootstrapWin(QtWidgets.QMainWindow):
         args = []
         # 模型：本地有就用路徑；沒有就用名稱交給 faster-whisper 下載
         model_name = self.model_combo.currentData()
-        # ① 先找你既有的 models/<name> 目錄
-        local_model_dir = (ROOT_DIR / "models" / model_name)
-        # ② 再找我們剛剛下載到的專案本地資料夾 model_path/<Repo>
         repo = MODEL_REPO_MAP.get(model_name, model_name)
-        local_hf_dir = self._repo_local_dir(repo)
-        if local_model_dir.exists():
-            use_dir = local_model_dir.resolve()
+        name_dir = MODEL_PATH / model_name
+        repo_dir = MODEL_PATH / repo.replace("/", "--")
+        if name_dir.exists() and any(name_dir.iterdir()):
+            use_dir = name_dir.resolve()
             args += ["--model_dir", str(use_dir)]
             self.append_log(f"使用本地模型：{use_dir}")
-        elif local_hf_dir.exists():
-            use_dir = local_hf_dir.resolve()
+        elif repo_dir.exists() and any(repo_dir.iterdir()):
+            use_dir = repo_dir.resolve()
             args += ["--model_dir", str(use_dir)]
-            self.append_log(f"使用本地模型（專案目錄）：{use_dir}")
+            self.append_log(f"使用本地模型：{use_dir}")
         else:
             # 無本地資料夾 → 交給 faster-whisper 以 Repo ID 取用（會走快取）
             args += ["--model_dir", repo]
