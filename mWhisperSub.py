@@ -326,13 +326,30 @@ def _prompt_hf_token() -> bool:
         QtWidgets = None  # type: ignore
 
     if QtWidgets and QtWidgets.QApplication.instance():  # pragma: no cover - requires GUI
-        token, ok = QtWidgets.QInputDialog.getText(
-            None,
-            "Hugging Face Login",
-            "Enter your Hugging Face token:",
-        )
-        if not ok or not token:
+        class TokenDialog(QtWidgets.QDialog):
+            def __init__(self):
+                super().__init__()
+                self.setWindowTitle("Hugging Face Login")
+                layout = QtWidgets.QVBoxLayout(self)
+                label = QtWidgets.QLabel(
+                    '<a href="https://huggingface.co/settings/tokens">Get your Hugging Face token</a>'
+                )
+                label.setOpenExternalLinks(True)
+                layout.addWidget(label)
+                self.edit = QtWidgets.QLineEdit()
+                self.edit.setEchoMode(QtWidgets.QLineEdit.Password)
+                layout.addWidget(self.edit)
+                buttons = QtWidgets.QDialogButtonBox(
+                    QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+                )
+                buttons.accepted.connect(self.accept)
+                buttons.rejected.connect(self.reject)
+                layout.addWidget(buttons)
+
+        dlg = TokenDialog()
+        if dlg.exec_() != QtWidgets.QDialog.Accepted or not dlg.edit.text():
             return False
+        token = dlg.edit.text()
         try:
             hf_login(token)
         except Exception as exc:
@@ -343,6 +360,7 @@ def _prompt_hf_token() -> bool:
 
     if sys.stdin.isatty():
         print("translation model requires a HuggingFace token")
+        print("Get one at https://huggingface.co/settings/tokens")
         try:
             subprocess.run(["huggingface-cli", "login"], check=True)
         except Exception:  # pragma: no cover
