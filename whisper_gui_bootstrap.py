@@ -469,6 +469,7 @@ def _prompt_hf_token() -> bool:
 # ──────────── GUI ────────────
 class BootstrapWin(QtWidgets.QMainWindow):
     gpu_list_ready = QtCore.pyqtSignal(list)
+    audio_list_ready = QtCore.pyqtSignal(list)
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Whisper Caption – 安裝與啟動器")
@@ -591,8 +592,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         # 錄音設備選擇（展開前自動刷新）
         self.audio_device_combo = QtWidgets.QComboBox()
-        form_layout.addRow("錄音設備", self.audio_device_combo)
+        self.audio_list_ready.connect(self._apply_audio_list)
         self.refresh_audio_devices()
+        form_layout.addRow("錄音設備", self.audio_device_combo)
         def _showPopup():
             self.refresh_audio_devices()
             QtWidgets.QComboBox.showPopup(self.audio_device_combo)
@@ -1276,8 +1278,22 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
     def refresh_audio_devices(self):
         self.audio_device_combo.clear()
-        for idx, label, sr in list_audio_devices():
-            self.audio_device_combo.addItem(label, (idx, sr))
+        self.audio_device_combo.addItem("掃描中…", (-1, 16000))
+
+        def worker():
+            devices = list_audio_devices()
+            self.audio_list_ready.emit(devices)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @QtCore.pyqtSlot(list)
+    def _apply_audio_list(self, items: list[tuple[int, str, int]]):
+        self.audio_device_combo.clear()
+        if items:
+            for idx, label, sr in items:
+                self.audio_device_combo.addItem(label, (idx, sr))
+        else:
+            self.audio_device_combo.addItem("偵測失敗", (-1, 16000))
 
     def detect_noise_level(self):
         dev_data = self.audio_device_combo.currentData()
