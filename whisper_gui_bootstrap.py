@@ -1606,131 +1606,137 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self._ui_log(f"安裝失敗: {e}")
 
     def _download_model_with_progress(self, repo_id: str):
-        """
-        使用 snapshot_download + 自訂 Qt 版 tqdm，顯示**位元組級**真實進度。
-        """
+        """下載指定 Hugging Face 模型並顯示真實進度。"""
+        # 若此函式在非 GUI 執行緒被呼叫，重新排程到主執行緒
+        if QtCore.QThread.currentThread() is not self.thread():  # pragma: no cover - GUI thread guard
+            QtCore.QMetaObject.invokeMethod(
+                self,
+                "_download_model_with_progress",
+                QtCore.Qt.BlockingQueuedConnection,
+                QtCore.Q_ARG(str, repo_id),
+            )
+            return
+
         try:
             from huggingface_hub import snapshot_download
         except Exception:
             raise RuntimeError("缺少 huggingface_hub，請先完成套件安裝")
 
-        # 顯示快取路徑（診斷用）
-        self._ui_log(f"HuggingFace cache: {CACHE_PATH}")
+        while True:
+            # 顯示快取路徑（診斷用）
+            self._ui_log(f"HuggingFace cache: {CACHE_PATH}")
 
-        # 進度對話框（byte 級）
-        dlg = QtWidgets.QProgressDialog("準備下載…", "取消", 0, 100, self)
-        dlg.setWindowTitle("下載語言模型")
-        dlg.setWindowModality(QtCore.Qt.WindowModal)
-        dlg.setMinimumWidth(480)
-        dlg.setAutoClose(False)
-        dlg.setAutoReset(False)
-        bar = QtWidgets.QProgressBar(dlg)
-        bar.setRange(0, 0)  # 未知進度時顯示忙碌動畫
-        dlg.setBar(bar)
-        dlg.show()
+            dlg = QtWidgets.QProgressDialog("準備下載…", "取消", 0, 100, self)
+            dlg.setWindowTitle("下載語言模型")
+            dlg.setWindowModality(QtCore.Qt.WindowModal)
+            dlg.setMinimumWidth(480)
+            dlg.setAutoClose(False)
+            dlg.setAutoReset(False)
+            bar = QtWidgets.QProgressBar(dlg)
+            bar.setRange(0, 0)
+            dlg.setBar(bar)
+            dlg.show()
 
-        progress = {"target": 0}
-        timer = QtCore.QTimer(dlg)
-        timer.setInterval(100)
+            progress = {"target": 0}
+            timer = QtCore.QTimer(dlg)
+            timer.setInterval(100)
 
-        def animate():
-            bar.setValue(progress["target"])
+            def animate():
+                bar.setValue(progress["target"])
 
-        timer.timeout.connect(animate)
-        timer.start()
+            timer.timeout.connect(animate)
+            timer.start()
 
-        cancelled = {"flag": False}
-        result = {"error": None}  # None=成功, "cancelled"=使用者取消, 其他=錯誤訊息
+            cancelled = {"flag": False}
+            result = {"error": None}
 
-        class QtTqdm(tqdm.tqdm):
-            """最簡做法：直接用 tqdm 的 desc 與 n/total → 以 0–100% 顯示目前這條下載列"""
+            class QtTqdm(tqdm.tqdm):
+                """以 0–100% 顯示 bytes 進度列"""
 
-            def __init__(self, *args, **kwargs):
-                # 僅顯示「檔案下載」那種 bytes 進度列；像 'Fetching N files' 一律關閉
-                unit = kwargs.get("unit")
-                unit_scale = kwargs.get("unit_scale", False)
-                self._is_bytes = bool((unit == "B") or unit_scale)
-                if not self._is_bytes:
-                    # 非 bytes 進度列（例如檔案數量），不參與 GUI 統計
-                    kwargs["disable"] = True
-                super().__init__(*args, **kwargs)
-                # 就用 0~100 來顯示百分比；每換一條 bytes 進度列（新的檔案）就重置 label
-                if self._is_bytes:
-                    QtCore.QMetaObject.invokeMethod(
-                        bar, "setMaximum", QtCore.Qt.QueuedConnection,
-                        QtCore.Q_ARG(int, 100)
-                    )
-                    QtCore.QMetaObject.invokeMethod(
-                        bar, "setValue", QtCore.Qt.QueuedConnection,
-                        QtCore.Q_ARG(int, 0)
-                    )
-                    QtCore.QMetaObject.invokeMethod(
-                        dlg, "setLabelText", QtCore.Qt.QueuedConnection,
-                        QtCore.Q_ARG(str, f"{self.desc or '下載中'}: 0%")
-                    )
-
-            def update(self, n=1):
-                if cancelled["flag"]:
-                    raise RuntimeError("使用者取消下載")
-                super().update(n)
-                if self._is_bytes and self.total:
-                    pct = int(min(100, max(0, round(self.n * 100.0 / float(self.total)))))
-                    progress["target"] = pct
-                    # 標題顯示「檔名: XX%」，對齊你終端機看到的樣式
-                    label = f"{self.desc or '下載中'}: {pct}%"
-                    QtCore.QMetaObject.invokeMethod(
-                        dlg, "setLabelText", QtCore.Qt.QueuedConnection,
-                        QtCore.Q_ARG(str, label)
-                    )
-
-        def worker():
-            try:
-                local_dir = self._repo_local_dir(repo_id)
-                self._ui_log(f"下載到本地模型資料夾：{local_dir}")
-                while True:
-                    try:
-                        snapshot_download(
-                            repo_id=repo_id,
-                            repo_type="model",
-                            local_dir=str(local_dir),  # 新版 hub: 指定 local_dir 即為實體檔，無 symlink
-                            cache_dir=str(CACHE_PATH),
-                            tqdm_class=QtTqdm,
+                def __init__(self, *args, **kwargs):
+                    unit = kwargs.get("unit")
+                    unit_scale = kwargs.get("unit_scale", False)
+                    self._is_bytes = bool((unit == "B") or unit_scale)
+                    if not self._is_bytes:
+                        kwargs["disable"] = True
+                    super().__init__(*args, **kwargs)
+                    if self._is_bytes:
+                        QtCore.QMetaObject.invokeMethod(
+                            bar, "setMaximum", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(int, 100)
                         )
-                        break
-                    except Exception as e:
-                        err = str(e)
-                        if "取消下載" in err:
-                            result["error"] = "cancelled"
+                        QtCore.QMetaObject.invokeMethod(
+                            bar, "setValue", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(int, 0)
+                        )
+                        QtCore.QMetaObject.invokeMethod(
+                            dlg,
+                            "setLabelText",
+                            QtCore.Qt.QueuedConnection,
+                            QtCore.Q_ARG(str, f"{self.desc or '下載中'}: 0%"),
+                        )
+
+                def update(self, n=1):
+                    if cancelled["flag"]:
+                        raise RuntimeError("使用者取消下載")
+                    super().update(n)
+                    if self._is_bytes and self.total:
+                        pct = int(min(100, max(0, round(self.n * 100.0 / float(self.total)))))
+                        progress["target"] = pct
+                        label = f"{self.desc or '下載中'}: {pct}%"
+                        QtCore.QMetaObject.invokeMethod(
+                            dlg, "setLabelText", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, label)
+                        )
+
+            def worker():
+                try:
+                    local_dir = self._repo_local_dir(repo_id)
+                    self._ui_log(f"下載到本地模型資料夾：{local_dir}")
+                    while True:
+                        try:
+                            snapshot_download(
+                                repo_id=repo_id,
+                                repo_type="model",
+                                local_dir=str(local_dir),
+                                cache_dir=str(CACHE_PATH),
+                                tqdm_class=QtTqdm,
+                            )
                             break
-                        if "401" in err or "token" in err.lower():
-                            if _prompt_hf_token():
-                                continue
-                        result["error"] = err
-                        break
-            except Exception as e:
-                result["error"] = str(e)
-            finally:
-                progress["target"] = 100
-                QtCore.QMetaObject.invokeMethod(
-                    bar, "setValue", QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(int, 100)
-                )
-                QtCore.QMetaObject.invokeMethod(timer, "stop", QtCore.Qt.QueuedConnection)
-                QtCore.QMetaObject.invokeMethod(dlg, "close", QtCore.Qt.QueuedConnection)
+                        except Exception as e:
+                            err = str(e)
+                            if "取消下載" in err:
+                                result["error"] = "cancelled"
+                                break
+                            if "401" in err or "token" in err.lower():
+                                result["error"] = "token"
+                                break
+                            result["error"] = err
+                            break
+                except Exception as e:
+                    result["error"] = str(e)
+                finally:
+                    progress["target"] = 100
+                    QtCore.QMetaObject.invokeMethod(
+                        bar, "setValue", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(int, 100)
+                    )
+                    QtCore.QMetaObject.invokeMethod(timer, "stop", QtCore.Qt.QueuedConnection)
+                    QtCore.QMetaObject.invokeMethod(dlg, "close", QtCore.Qt.QueuedConnection)
 
-        def on_cancel():
-            cancelled["flag"] = True
+            def on_cancel():
+                cancelled["flag"] = True
 
-        dlg.canceled.connect(on_cancel)
-        t = threading.Thread(target=worker, daemon=True); t.start()
-        while t.is_alive():
-            QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 100)
-        # 只有在 worker 回報「真正取消」或錯誤時才丟例外
+            dlg.canceled.connect(on_cancel)
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+            while t.is_alive():
+                QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 100)
+
+            if result["error"] == "token" and _prompt_hf_token():
+                continue
+            break
+
         if result["error"] == "cancelled":
             raise RuntimeError("使用者取消下載")
-        elif result["error"]:
+        if result["error"] and result["error"] != "token":
             raise RuntimeError(result["error"])
-        # 成功：把進度條補滿並提示完成
         self._ui_log("模型檢查/下載完成。")
 
     def start_clicked(self):
