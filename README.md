@@ -41,4 +41,4 @@ GUI 選單會以「(未下載)」標示尚未取得的模型或翻譯語言，�
 ## 模型下載設定
 所有語音與翻譯模型的下載網址及儲存路徑集中於 `Config.json`，
 欲更換鏡像或更新版本時，修改此檔即可。預設 `model_path` 為專案根目錄下的 `models`。
-GUI 下載的模型與啟動時的模型搜尋都會使用此路徑；`cache_path` 可設定 Hugging Face 暫存位置，預設為系統的 `~/.cache/huggingface/hub`。
+GUI 下載的模型與啟動時的模型搜尋都會使用此路徑；`cache_path` 指向 Hugging Face 的 `hub` 目錄（預設 `~/.cache/huggingface/hub`），程式會自動將其父層設為 `HF_HOME`，以取代已棄用的 `TRANSFORMERS_CACHE`。

@@ -78,11 +78,13 @@ ROOT_DIR = Path(__file__).resolve().parent
 CONFIG = json.loads((ROOT_DIR / "Config.json").read_text(encoding="utf-8"))
 MODEL_PATH = ROOT_DIR / CONFIG.get("model_path", "models")
 MODEL_PATH.mkdir(parents=True, exist_ok=True)
-DEFAULT_CACHE = str(Path.home() / ".cache" / "huggingface" / "hub")
-CACHE_PATH = Path(CONFIG.get("cache_path", DEFAULT_CACHE)).expanduser().resolve()
+# Hub caches live directly under `CACHE_PATH`; set `HF_HOME` to its parent
+# so both transformers and huggingface_hub use this directory without
+# triggering deprecation warnings.
+DEFAULT_CACHE = Path.home() / ".cache" / "huggingface" / "hub"
+CACHE_PATH = Path(CONFIG.get("cache_path", str(DEFAULT_CACHE))).expanduser().resolve()
 CACHE_PATH.mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(CACHE_PATH))
-os.environ.setdefault("TRANSFORMERS_CACHE", str(CACHE_PATH))
+os.environ.setdefault("HF_HOME", str(CACHE_PATH.parent))
 MIN_TORCH = version.parse("2.6")
 _REPO_MAP = CONFIG["MODEL_REPO_MAP"]
 TRANSLATE_MODEL_MAP = {

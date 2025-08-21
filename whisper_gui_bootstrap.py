@@ -68,11 +68,14 @@ with (ROOT_DIR / "Config.json").open(encoding="utf-8") as f:
     CONFIG = json.load(f)
 MODEL_PATH = (ROOT_DIR / CONFIG.get("model_path", "models")).resolve()
 MODEL_PATH.mkdir(parents=True, exist_ok=True)
-CACHE_DEFAULT = str(Path.home() / ".cache" / "huggingface" / "hub")
-CACHE_PATH = Path(CONFIG.get("cache_path", CACHE_DEFAULT)).expanduser().resolve()
+# `CACHE_PATH` points to the Hugging Face hub directory containing
+# `models--*` caches.  We also set `HF_HOME` to its parent so the
+# transformers library uses the same location without relying on the
+# deprecated `TRANSFORMERS_CACHE` variable.
+CACHE_DEFAULT = Path.home() / ".cache" / "huggingface" / "hub"
+CACHE_PATH = Path(CONFIG.get("cache_path", str(CACHE_DEFAULT))).expanduser().resolve()
 CACHE_PATH.mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(CACHE_PATH))
-os.environ.setdefault("TRANSFORMERS_CACHE", str(CACHE_PATH))
+os.environ.setdefault("HF_HOME", str(CACHE_PATH.parent))
 
 CUDA_TAGS = ("cu126", "cu124", "cu121")
 FORCE_CUDA = os.getenv("FORCE_CUDA") == "1"
