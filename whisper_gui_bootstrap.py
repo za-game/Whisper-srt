@@ -24,7 +24,7 @@ def ensure_local_path():
     if not has_local or pth_exists:
         sys.path.insert(0, base_dir)
 ensure_local_path()
-from typing import Optional
+from typing import Any, Optional
 import subprocess
 import sys
 import base64
@@ -54,7 +54,6 @@ import urllib.request, urllib.parse
 import sounddevice as sd
 import signal
 import threading
-import time
 import tqdm
 import numpy as np
 import locale
@@ -344,6 +343,24 @@ class EnvWorker(QtCore.QThread):
     def run(self) -> None:  # type: ignore[override]
         info = _gather_env()
         self.result.emit(info)
+
+
+class _ProgressWorker(QtCore.QThread):
+    finished = QtCore.pyqtSignal(object, object)
+
+    def __init__(self, task, cancel_flag):
+        super().__init__()
+        self._task = task
+        self._cancel_flag = cancel_flag
+
+    def run(self):  # type: ignore[override]
+        data = None
+        err = None
+        try:
+            data = self._task(lambda: self._cancel_flag[0])
+        except Exception as e:  # pragma: no cover - worker error propagation
+            err = e
+        self.finished.emit(data, err)
 
 def is_installed(pkg):
     return importlib.util.find_spec(pkg) is not None
@@ -1538,32 +1555,29 @@ class BootstrapWin(QtWidgets.QMainWindow):
         bar = QtWidgets.QProgressBar(dlg)
         bar.setRange(0, 0)
         dlg.setBar(bar)
-        dlg.show()
 
-        cancelled = {"flag": False}
-        result = {"error": None, "data": None}
+        cancelled = [False]
+        result: dict[str, Any] = {"data": None, "error": None}
 
         def on_cancel():
-            cancelled["flag"] = True
+            cancelled[0] = True
 
         dlg.canceled.connect(on_cancel)
 
-        def worker():
-            try:
-                result["data"] = task(lambda: cancelled["flag"])
-            except Exception as e:
-                result["error"] = str(e)
-            finally:
-                QtCore.QMetaObject.invokeMethod(dlg, "close", QtCore.Qt.QueuedConnection)
+        worker = _ProgressWorker(task, cancelled)
 
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
-        while t.is_alive():
-            QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 100)
-            time.sleep(0.05)
+        def on_finished(data, err):
+            result["data"] = data
+            result["error"] = err
+            dlg.close()
+
+        worker.finished.connect(on_finished)
+        worker.start()
+        dlg.exec()
+        worker.wait()
         if result["error"]:
-            raise RuntimeError(result["error"])
-        if cancelled["flag"]:
+            raise RuntimeError(str(result["error"]))
+        if cancelled[0]:
             raise RuntimeError("使用者取消")
         return result["data"]
 
