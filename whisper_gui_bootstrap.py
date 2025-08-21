@@ -606,14 +606,14 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # GPU 選擇
         self.gpu_combo = QtWidgets.QComboBox()
         self.gpu_list_ready.connect(self._apply_gpu_list)
-        self.refresh_gpu_list()
+        QtCore.QTimer.singleShot(0, self.refresh_gpu_list)
         self.gpu_combo.setEnabled(self.device_combo.currentText().startswith("cuda"))
         form_layout.addRow("GPU", self.gpu_combo)
 
         # 錄音設備選擇（展開前自動刷新）
         self.audio_device_combo = QtWidgets.QComboBox()
         self.audio_list_ready.connect(self._apply_audio_list)
-        self.refresh_audio_devices()
+        QtCore.QTimer.singleShot(0, self.refresh_audio_devices)
         form_layout.addRow("錄音設備", self.audio_device_combo)
         def _showPopup():
             self.refresh_audio_devices()
