@@ -411,6 +411,43 @@ def install_deps(cuda_tag, torch_ver=None, index_url=None, log_fn=None, cancel_f
         cancel_flag=cancel_flag,
     )
 
+# Hugging Face authentication helper
+def _prompt_hf_token() -> bool:
+    """Prompt the user for a Hugging Face token via GUI or CLI."""
+    try:
+        from PyQt5 import QtWidgets  # type: ignore
+    except Exception:  # pragma: no cover
+        QtWidgets = None  # type: ignore
+    try:
+        from huggingface_hub import login as hf_login  # type: ignore
+    except Exception:  # pragma: no cover
+        hf_login = None
+    if QtWidgets and QtWidgets.QApplication.instance():  # pragma: no cover - requires GUI
+        token, ok = QtWidgets.QInputDialog.getText(
+            None,
+            "Hugging Face Login",
+            "Enter your Hugging Face token:",
+        )
+        if not ok or not token:
+            return False
+        try:
+            if hf_login:
+                hf_login(token)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(None, "Hugging Face Login", str(exc))
+            return False
+        QtWidgets.QMessageBox.information(None, "Hugging Face Login", "Login successful")
+        return True
+    if sys.stdin.isatty():
+        print("model download requires a HuggingFace token")
+        try:
+            subprocess.run(["huggingface-cli", "login"], check=True)
+        except Exception:  # pragma: no cover
+            print("run 'huggingface-cli login' in another terminal")
+            input("Press Enter after completing login to retry...")
+        return True
+    return False
+
 # ──────────── GUI ────────────
 class BootstrapWin(QtWidgets.QMainWindow):
     def __init__(self):
@@ -1648,26 +1685,31 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         def worker():
             try:
-                # ✅ 不分平台：一律下載到專案內的 model_path/<Repo>
                 local_dir = self._repo_local_dir(repo_id)
                 self._ui_log(f"下載到本地模型資料夾：{local_dir}")
-                snapshot_download(
-                    repo_id=repo_id,
-                    repo_type="model",
-                    local_dir=str(local_dir),   # 新版 hub: 指定 local_dir 即為實體檔，無 symlink
-                    cache_dir=str(CACHE_PATH),
-                    tqdm_class=QtTqdm,
-                )
-            except RuntimeError as e:
-                # 只有在「真的中途取消」時才記為 cancelled
-                if "取消下載" in str(e):
-                    result["error"] = "cancelled"
-                else:
-                    result["error"] = str(e)
+                while True:
+                    try:
+                        snapshot_download(
+                            repo_id=repo_id,
+                            repo_type="model",
+                            local_dir=str(local_dir),  # 新版 hub: 指定 local_dir 即為實體檔，無 symlink
+                            cache_dir=str(CACHE_PATH),
+                            tqdm_class=QtTqdm,
+                        )
+                        break
+                    except Exception as e:
+                        err = str(e)
+                        if "取消下載" in err:
+                            result["error"] = "cancelled"
+                            break
+                        if "401" in err or "token" in err.lower():
+                            if _prompt_hf_token():
+                                continue
+                        result["error"] = err
+                        break
             except Exception as e:
                 result["error"] = str(e)
             finally:
-                # 補滿進度並關閉對話框（不會觸發 canceled）
                 progress["target"] = 100
                 QtCore.QMetaObject.invokeMethod(
                     bar, "setValue", QtCore.Qt.QueuedConnection,
