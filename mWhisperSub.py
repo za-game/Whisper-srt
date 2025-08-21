@@ -403,7 +403,7 @@ def _load_translate_pipe(src: str, tgt: str):
             model = str(local)
         while True:
             try:
-                pipe = pipeline("translation", model=model, cache_dir=str(CACHE_PATH), **kwargs)
+                pipe = pipeline("translation", model=model, **kwargs)
                 break
             except Exception as exc:  # pragma: no cover - runtime dependency
                 err = str(exc)
