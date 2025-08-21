@@ -468,6 +468,7 @@ def _prompt_hf_token() -> bool:
 
 # ──────────── GUI ────────────
 class BootstrapWin(QtWidgets.QMainWindow):
+    gpu_list_ready = QtCore.pyqtSignal(list)
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Whisper Caption – 安裝與啟動器")
@@ -583,6 +584,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         # GPU 選擇
         self.gpu_combo = QtWidgets.QComboBox()
+        self.gpu_list_ready.connect(self._apply_gpu_list)
         self.refresh_gpu_list()
         self.gpu_combo.setEnabled(self.device_combo.currentText().startswith("cuda"))
         form_layout.addRow("GPU", self.gpu_combo)
@@ -1320,7 +1322,17 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
     def refresh_gpu_list(self):
         self.gpu_combo.clear()
-        names = list_gpus()
+        self.gpu_combo.addItem("掃描中…", -1)
+
+        def worker():
+            names = list_gpus(log_fn=self._ui_log)
+            self.gpu_list_ready.emit(names)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @QtCore.pyqtSlot(list)
+    def _apply_gpu_list(self, names: list[str]):
+        self.gpu_combo.clear()
         if names:
             for idx, name in enumerate(names):
                 self.gpu_combo.addItem(name, idx)
