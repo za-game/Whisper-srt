@@ -86,6 +86,15 @@ def parse_srt_realtime_text(path: Path, max_chars: int = 1200) -> str:
         text = "\n".join(raw_lines[i:]).strip()
         if not text or text == last_text:
             continue
+        if entries:
+            p_idx, p_tc, p_text = entries[-1]
+            if p_text.startswith(text):
+                last_text = p_text
+                continue
+            if text.startswith(p_text):
+                entries[-1] = (idx, tc, text)
+                last_text = text
+                continue
         replaced = False
         for n, (p_idx, p_tc, _) in enumerate(entries):
             if idx == p_idx and tc == p_tc:

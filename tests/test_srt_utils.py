@@ -92,3 +92,13 @@ def test_parse_srt_realtime_text_overlap_merge_cjk(tmp_path):
     srt = tmp_path / "h.srt"
     srt.write_text(content, encoding="utf-8")
     assert parse_srt_realtime_text(srt) == "檢警還發現其中一名共犯"
+
+
+def test_parse_srt_realtime_text_prefix_candidate(tmp_path):
+    content = (
+        "1\n00:00:00,000 --> 00:00:02,000\n這一塊其實是你全身最硬的組織\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\n這一塊其實是你全身\n"
+    )
+    srt = tmp_path / "i.srt"
+    srt.write_text(content, encoding="utf-8")
+    assert parse_srt_realtime_text(srt) == "這一塊其實是你全身最硬的組織"

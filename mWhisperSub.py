@@ -885,6 +885,14 @@ def writer():
                 write_q.task_done(); continue
             if rec["text"] == last["text"]:
                 write_q.task_done(); continue
+            if abs(rec["start"] - last["start"]) < DEDUP_WIN:
+                if rec["text"].startswith(last["text"]):
+                    live[-1] = rec
+                    sliding[-1] = rec
+                    flush(live); last_flush = time.monotonic()
+                    write_q.task_done(); continue
+                if last["text"].startswith(rec["text"]):
+                    write_q.task_done(); continue
 
         # 2) similarity dedup
         if any(
