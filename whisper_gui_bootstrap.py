@@ -1949,6 +1949,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.overlay.show_entry_text("")
         if self.tray is None:
             self.tray = Tray(self.settings, self.overlay, parent=self, on_stop=self.stop_clicked)
+        self.hide()
         # 監看設定中的 srt_path → 更新最後一行到 overlay
         srt_path = self.settings.srt_path
         if self.srt_watcher is None:
