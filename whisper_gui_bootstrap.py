@@ -490,6 +490,7 @@ def _prompt_hf_token() -> bool:
 class BootstrapWin(QtWidgets.QMainWindow):
     gpu_list_ready = QtCore.pyqtSignal(list)
     audio_list_ready = QtCore.pyqtSignal(list)
+    mic_level_ready = QtCore.pyqtSignal(int)
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Whisper Caption – 安裝與啟動器")
@@ -645,6 +646,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         form_layout.addRow("音量門檻", gate_widget)
         form_layout.labelForField(gate_widget).setToolTip(self.mic_slider.toolTip())
         self.mic_slider.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.mic_level_ready.connect(self.mic_level_bar.setValue)
 
         # 靜音門檻秒數（mWhisperSub: --silence，預設 0.3）
         self.silence_spin = QtWidgets.QDoubleSpinBox()
@@ -739,6 +741,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self._level_timer = QtCore.QTimer(self)
         self._level_timer.timeout.connect(self._poll_mic_level)
         self._level_timer.start(200)
+        self._level_thread = None
         # 設定變更 → 觸發自動儲存（debounce）
         self.settings.changed.connect(lambda: self.schedule_autosave(300))
         # GUI 欄位變更也要 autosave
@@ -1343,18 +1346,25 @@ class BootstrapWin(QtWidgets.QMainWindow):
     def _poll_mic_level(self):
         if self.proc and self.proc.poll() is None:
             return
+        if self._level_thread and self._level_thread.is_alive():
+            return
         dev_data = self.audio_device_combo.currentData()
         dev_id, sr = dev_data if dev_data is not None else (-1, 16000)
-        try:
-            audio = sd.rec(
-                int(0.05 * sr), samplerate=sr, channels=1, dtype="float32", device=dev_id
-            )
-            sd.wait()
-            rms = _calc_rms(audio)
-            level = min(100, int(rms * 1000))
-            self.mic_level_bar.setValue(level)
-        except Exception:
-            pass
+
+        def worker() -> None:
+            try:
+                audio = sd.rec(
+                    int(0.05 * sr), samplerate=sr, channels=1, dtype="float32", device=dev_id
+                )
+                sd.wait()
+                rms = _calc_rms(audio)
+                level = min(100, int(rms * 1000))
+                self.mic_level_ready.emit(level)
+            except Exception:
+                pass
+
+        self._level_thread = threading.Thread(target=worker, daemon=True)
+        self._level_thread.start()
 
     def refresh_gpu_list(self):
         self.gpu_combo.clear()
