@@ -1261,7 +1261,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     mode=self._watch_mode(),
                 )
                 if self.overlay:
-                    self.srt_watcher.updated.connect(self.overlay.show_entry_text)
+                    self.srt_watcher.updated.connect(self.overlay.set_subtitle_text)
             self.status.appendPlainText(f"[Load] {p}")
         except Exception as e:
             self.status.appendPlainText(f"[Load] 失敗: {e}")
@@ -1332,7 +1332,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 mode=self._watch_mode(),
             )
             if self.overlay:
-                self.srt_watcher.updated.connect(self.overlay.show_entry_text)
+                self.srt_watcher.updated.connect(self.overlay.set_subtitle_text)
             self._ui_log(f"已選擇 SRT：{path}")
 
     def edit_srt_file(self):
@@ -1593,7 +1593,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             mode=self._watch_mode(),
         )
         if self.overlay:
-            self.srt_watcher.updated.connect(self.overlay.show_entry_text)
+            self.srt_watcher.updated.connect(self.overlay.set_subtitle_text)
         # 聚焦：把新檔打開編輯（可選）
         # os.startfile(str(hot_path))  # 若你想自動打開
         self._load_project()
@@ -2179,9 +2179,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.proc = None
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        # 清一下 overlay 畫面（保留視窗，避免第二次設定要再叫出）
+        # 清一下 overlay 畫面（保留視窗）
         if self.overlay:
-            self.overlay.show_entry_text("")
+            self.overlay.set_subtitle_text("")
         if getattr(self, "tray", None):
             self.tray.set_running(False)
 

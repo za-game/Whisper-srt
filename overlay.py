@@ -60,7 +60,49 @@ class Settings(QtCore.QObject):
 
 class SubtitleOverlay(QtWidgets.QLabel):
     BASE_MIN_W, BASE_MIN_H = 220, 90
+    def _on_scroll_anim(self, value):
+        # QVariantAnimation 在剛 start()/stop() 時，可能發出 None
+        if value is None:
+            return
+        try:
+            self._anim_offset = float(value)
+        except (TypeError, ValueError):
+            self._anim_offset = 0.0
+        self.update()
 
+    def _start_line_anim(self):
+        # 僅在換行/句完時呼叫
+        try:
+            self._scroll_anim.stop()
+        except Exception:
+            pass
+        # 由下往上微移入場：正值→0（或反過來，依你的審美）
+        self._scroll_anim.setStartValue(18)   # 進場位移像素，可調
+        self._scroll_anim.setEndValue(0)
+        self._scroll_anim.start()
+
+    def set_subtitle_text(self, text: str):
+        """
+        只在「新增一行」或「句子完結」時觸發動畫；其他同一行補字不動畫。
+        """
+        new_lines = [ln for ln in (text.splitlines()) if ln.strip()]
+        old_lines = getattr(self, "_last_lines", [])
+        # 1) 明確換行（行數增加）
+        newline = len(new_lines) > len(old_lines)
+        # 2) 句子完結（最後一行句末標點）
+        last = (new_lines[-1] if new_lines else "")
+        ended = bool(last) and last[-1] in "，。？！；、,.!?;:…"
+        # 3) 決定是否動畫
+        should_anim = newline or ended
+
+        # 更新文字
+        super().setText(text)
+
+        # 僅在需要時播放
+        if should_anim and self.settings.strategy == "realtime":
+            self._start_line_anim()
+                # 記錄狀態
+        self._last_lines = new_lines
     def __init__(self, settings: Settings):
         super().__init__("")
         self.settings = settings
@@ -98,8 +140,113 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self._anim_offset = 0.0
         self._scroll_anim = QtCore.QVariantAnimation(self)
         self._scroll_anim.setDuration(150)
+        self._scroll_anim.setEasingCurve(QtCore.QEasingCurve.OutCubic)
         self._scroll_anim.valueChanged.connect(self._on_scroll_anim)
+        # 追蹤「全局視覺行數」（依外框寬度軟換行後的總行數）
+        self._last_layout_line_count = 0
+        # 畫面位移量
+        self._anim_offset = 0.0
 
+    # 單一版本：動畫插值 → 垂直偏移像素
+    # ─────────────────────────────────────────────────────────
+    # 以「外框寬度」排版，取得全段文字的軟換行總行數（不裁可視高度）
+    # 回傳 (總行數, 行高)
+    def _safe_layout_lines(self, text: str, width: int) -> tuple[int, float]:
+        fm = QtGui.QFontMetricsF(self.font())
+        fallback_h = float(fm.lineSpacing())
+        if not text:
+            return 0, fallback_h
+        if width is None or width <= 0:
+            width = max(1, self.width() - 10)
+        try:
+            layout = QtGui.QTextLayout(text, self.font())
+            opt = layout.textOption()
+            opt.setWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
+            layout.setTextOption(opt)
+            layout.beginLayout()
+            lines = 0
+            line_h = 0.0
+            while True:
+                ln = layout.createLine()
+                if not ln.isValid():
+                    break
+                ln.setLineWidth(width)
+                lines += 1
+                if lines == 1:
+                    line_h = float(ln.height()) or fallback_h
+            layout.endLayout()
+            if lines == 0:
+                return 0, fallback_h
+            return lines, (line_h or fallback_h)
+        except Exception:
+            return 1, fallback_h
+
+    # ─────────────────────────────────────────────────────────
+    # 外部請呼叫這個方法更新字幕；只有在「全局視覺行數 +1」時才播放動畫
+    def set_subtitle_text(self, text: str):
+        self._current_text = text if text is not None else ""
+        super().setText(self._current_text)
+        if self.settings.strategy != "realtime":
+            self._anim_offset = 0.0
+            self.repaint()
+            return
+        # 與 paintEvent 的內距/偏移一致
+        rect = self.rect().adjusted(5, 5, -5, -5)
+        offx = getattr(self.settings, "offset_x", 0)
+        offy = getattr(self.settings, "offset_y", 0)
+        rect = rect.translated(offx, offy)
+        total, line_h = self._safe_layout_lines(self._current_text, rect.width())
+        prev_total = getattr(self, "_last_layout_line_count", 0)
+        animate = total > prev_total
+        if animate:
+            added = max(1, total - prev_total)
+            dy = float(line_h) * added
+            try:
+                self._scroll_anim.stop()
+            except Exception:
+                pass
+            self._scroll_anim.setStartValue(dy)
+            self._scroll_anim.setEndValue(0.0)
+            self._anim_offset = dy
+            self.update()
+            self._scroll_anim.start()
+        else:
+            self._anim_offset = 0.0
+            self.repaint()
+        self._last_layout_line_count = total
+            # 全局視覺行數（用 QTextLayout 排版後的總行數），避免可見區裁切誤觸
+        self._last_layout_line_count = 0
+
+    def _layout_line_count(self, text: str, width: int) -> tuple[int, float]:
+        """
+        回傳 (行數, 行高)：
+        行數為 QTextLayout 在指定寬度下的軟換行總行數（不裁切到可見高度）。
+        行高用於估算動畫位移。
+        """
+        if width <= 0 or not text:
+            fm = QtGui.QFontMetricsF(self.font())
+            return (0, fm.lineSpacing())
+        layout = QtGui.QTextLayout(text, self.font())
+        opt = layout.textOption()
+        opt.setWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(opt)
+        layout.beginLayout()
+        lines = 0
+        line_height = 0.0
+        while True:
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(width)
+            lines += 1
+            # 取第一行的高度代表行高（各行通常一致）
+            if lines == 1:
+                line_height = float(line.height())
+        layout.endLayout()
+        if line_height <= 0.0:
+            fm = QtGui.QFontMetricsF(self.font())
+            line_height = float(fm.lineSpacing())
+        return (lines, line_height)
     def _update_min_size(self):
         fm_f = QtGui.QFontMetricsF(self.font())
         char_w = QtGui.QFontMetrics(self.font()).horizontalAdvance("W" * 6)
@@ -479,15 +626,17 @@ class SubtitleOverlay(QtWidgets.QLabel):
             visible.insert(0, self._current_text[start : start + length])
         new_lines = visible
         prev = self._last_lines
-        animate = (
-            len(new_lines) > len(prev)
-            or (new_lines and prev and new_lines[-1] != prev[-1])
-        )
+        # 只有「視覺行數增加」（換行）才觸發動畫
+        text = self._current_text
+        rect = self.rect().adjusted(5, 5, -5, -5)  # 與 paintEvent 中一致的內距
+        total_lines, line_h = self._layout_line_count(text, rect.width())
+        prev_total = getattr(self, "_last_layout_line_count", 0)
+        animate = total_lines > prev_total
         self.setText("\n".join(new_lines))
         if animate:
-            fm = QtGui.QFontMetrics(self.font())
-            added = max(1, len(new_lines) - len(prev))
-            dy = fm.lineSpacing() * added
+            # 以「新增的全局行數」估算位移；至少 1 行
+            added = max(1, total_lines - prev_total)
+            dy = line_h * added
             self._scroll_anim.stop()
             self._scroll_anim.setStartValue(dy)
             self._scroll_anim.setEndValue(0)
@@ -495,6 +644,9 @@ class SubtitleOverlay(QtWidgets.QLabel):
         else:
             self._anim_offset = 0.0
             self.repaint()
+        
+        # 更新基準
+        self._last_layout_line_count = total_lines
         self._last_lines = new_lines
 
     def resizeEvent(self, ev):
