@@ -609,19 +609,18 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # GPU 選擇
         self.gpu_combo = QtWidgets.QComboBox()
         self.gpu_list_ready.connect(self._apply_gpu_list)
-        QtCore.QTimer.singleShot(0, self.refresh_gpu_list)
         self.gpu_combo.setEnabled(self.device_combo.currentText().startswith("cuda"))
         form_layout.addRow("GPU", self.gpu_combo)
 
-        # 錄音設備選擇（展開前自動刷新）
+        # 錄音設備選擇（按鈕觸發偵測）
         self.audio_device_combo = QtWidgets.QComboBox()
         self.audio_list_ready.connect(self._apply_audio_list)
-        QtCore.QTimer.singleShot(0, self.refresh_audio_devices)
-        form_layout.addRow("錄音設備", self.audio_device_combo)
-        def _showPopup():
-            self.refresh_audio_devices()
-            QtWidgets.QComboBox.showPopup(self.audio_device_combo)
-        self.audio_device_combo.showPopup = _showPopup
+        self.audio_device_btn = QtWidgets.QPushButton("刷新")
+        self.audio_device_btn.clicked.connect(self.refresh_audio_devices)
+        audio_layout = QtWidgets.QHBoxLayout()
+        audio_layout.addWidget(self.audio_device_combo)
+        audio_layout.addWidget(self.audio_device_btn)
+        form_layout.addRow("錄音設備", audio_layout)
 
         # VAD 控制
         self.vad_combo = QtWidgets.QComboBox()
@@ -762,7 +761,18 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.installEventFilter(self)
         # 啟動時嘗試還原上次專案（使用全域 QSettings）
         QtCore.QTimer.singleShot(0, self._auto_open_last_project)
+        self._initial_checks_done = False
         # —— 統一的本地模型資料夾：model_path/<Repo> —— #
+
+    def showEvent(self, ev: QtGui.QShowEvent) -> None:  # type: ignore[override]
+        super().showEvent(ev)
+        if not self._initial_checks_done:
+            QtCore.QTimer.singleShot(0, self._initial_checks)
+            self._initial_checks_done = True
+
+    def _initial_checks(self) -> None:
+        self.refresh_audio_devices()
+        self.check_env()
     def _repo_local_dir(self, repo_id: str) -> Path:
         return MODEL_PATH / repo_id.replace("/", "--")
 
