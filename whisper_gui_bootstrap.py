@@ -379,6 +379,7 @@ def run_pip(args, log_fn=None, cancel_flag=None):
         text=True,
         bufsize=1,
     )
+    cancelled = False
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -386,12 +387,13 @@ def run_pip(args, log_fn=None, cancel_flag=None):
                 log_fn(line.rstrip())
             if cancel_flag and cancel_flag():
                 proc.terminate()
+                cancelled = True
                 break
         proc.wait()
     finally:
         if proc.stdout:
             proc.stdout.close()
-    if cancel_flag and cancel_flag():
+    if cancelled:
         raise RuntimeError("使用者取消")
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd)
