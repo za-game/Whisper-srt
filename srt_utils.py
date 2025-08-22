@@ -40,21 +40,21 @@ def parse_srt_last_text(path: Path) -> str:
 
 
 def parse_srt_realtime_text(path: Path, max_chars: int = 1200) -> str:
-    """Join all subtitle texts and return the tail trimmed on line boundaries.
+    """Join all subtitle texts, merging overlaps and trimming old content.
 
-    Consecutive blocks with identical text are ignored.  When a new block
+    Consecutive blocks with identical text are ignored. When a new block
     repeats the previous index/timecode with different text, it replaces the
     prior entry so that intermediate candidates are overwritten by the final
-    subtitle.
+    subtitle.  Overlapping words across neighbouring blocks are merged so that
+    sliding-window duplication is removed.
 
     Parameters
     ----------
     path:
         SRT file path.
     max_chars:
-        Approximate character limit.  Older content beyond the limit is
-        discarded, but the cut occurs after the nearest newline so that the
-        display always starts on a whole line.  ``0`` disables the limit.
+        Approximate character limit. Older content beyond the limit is
+        discarded on the nearest word boundary. ``0`` disables the limit.
     """
 
     try:
@@ -96,15 +96,31 @@ def parse_srt_realtime_text(path: Path, max_chars: int = 1200) -> str:
             entries.append((idx, tc, text))
         last_text = text
 
-    joined = "\n".join(t for _, _, t in entries).strip()
+    words: list[str] = []
+    for _, _, text in entries:
+        new_words = text.replace("\n", " ").split()
+        if not new_words:
+            continue
+        if not words:
+            words.extend(new_words)
+            continue
+        max_overlap = min(len(words), len(new_words))
+        overlap = 0
+        for k in range(max_overlap, 0, -1):
+            if words[-k:] == new_words[:k]:
+                overlap = k
+                break
+        words.extend(new_words[overlap:])
+
+    joined = " ".join(words).strip()
     if max_chars > 0 and len(joined) > max_chars:
         cutoff = len(joined) - max_chars
-        nl = joined.find("\n", cutoff)
-        if nl != -1:
-            joined = joined[nl + 1 :]
+        sp = joined.find(" ", cutoff)
+        if sp != -1:
+            joined = joined[sp + 1 :]
         else:
             joined = joined[-max_chars:]
-    return joined.replace("\n", " ")
+    return joined
 
 
 class LiveSRTWatcher(QtCore.QObject):

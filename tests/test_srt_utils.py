@@ -72,3 +72,13 @@ def test_parse_srt_realtime_text_overwrite_nonconsecutive(tmp_path):
     srt = tmp_path / "f.srt"
     srt.write_text(content, encoding="utf-8")
     assert parse_srt_realtime_text(srt) == "Hello there World"
+
+
+def test_parse_srt_realtime_text_overlap_merge(tmp_path):
+    content = (
+        "1\n00:00:00,000 --> 00:00:02,000\nThis is a test\n\n"
+        "2\n00:00:01,500 --> 00:00:03,000\nis a test of the system\n"
+    )
+    srt = tmp_path / "g.srt"
+    srt.write_text(content, encoding="utf-8")
+    assert parse_srt_realtime_text(srt) == "This is a test of the system"
