@@ -38,6 +38,8 @@ from typing import Deque, List, Tuple, Any
 import re
 import zlib
 
+from srt_utils import drop_covered_blocks
+
 import numpy as np
 import scipy.signal as ss
 import sounddevice as sd
@@ -869,6 +871,9 @@ def writer():
     last_flush = time.monotonic()
     while True:
         rec = write_q.get(); now = rec["start"]
+
+        live = drop_covered_blocks(live, rec)
+        sliding = drop_covered_blocks(sliding, rec)
 
         # 1) replace or skip exact duplicates
         if live:

@@ -137,6 +137,24 @@ def parse_srt_realtime_text(path: Path, max_chars: int = 1200) -> str:
     return joined
 
 
+def drop_covered_blocks(blocks: list[dict], new_block: dict, tol: float = 1e-3) -> list[dict]:
+    """Remove blocks fully covered by ``new_block``'s time span.
+
+    Parameters
+    ----------
+    blocks:
+        Existing subtitle records each with ``start`` and ``end`` keys.
+    new_block:
+        The incoming record whose time range may encompass older ones.
+    tol:
+        Allowed timecode tolerance in seconds when comparing spans.
+    """
+
+    start = new_block["start"] - tol
+    end = new_block["end"] + tol
+    return [b for b in blocks if not (b["start"] >= start and b["end"] <= end)]
+
+
 class LiveSRTWatcher(QtCore.QObject):
     updated = QtCore.pyqtSignal(str)  # text
 

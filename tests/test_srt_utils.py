@@ -2,7 +2,7 @@ from pathlib import Path
 import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
-from srt_utils import parse_srt_last_text, parse_srt_realtime_text
+from srt_utils import parse_srt_last_text, parse_srt_realtime_text, drop_covered_blocks
 
 
 def test_parse_srt_last_text_basic(tmp_path):
@@ -102,3 +102,27 @@ def test_parse_srt_realtime_text_prefix_candidate(tmp_path):
     srt = tmp_path / "i.srt"
     srt.write_text(content, encoding="utf-8")
     assert parse_srt_realtime_text(srt) == "這一塊其實是你全身最硬的組織"
+
+
+def test_drop_covered_blocks_merge(tmp_path):
+    live = [
+        {"start": 0.0, "end": 2.0, "text": "在查 我們在"},
+        {"start": 2.5, "end": 3.0, "text": "要求說"},
+    ]
+    final = {"start": 0.0, "end": 3.0, "text": "我們在查 我們在要求說"}
+    live = drop_covered_blocks(live, final)
+    live.append(final)
+    srt_path = tmp_path / "merge.srt"
+    def fmt(t):
+        h = int(t // 3600)
+        m = int((t % 3600) // 60)
+        s = int(t % 60)
+        ms = int(round((t - int(t)) * 1000))
+        return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+    content = "".join(
+        f"{i}\n{fmt(r['start'])} --> {fmt(r['end'])}\n{r['text']}\n\n"
+        for i, r in enumerate(live, 1)
+    )
+    srt_path.write_text(content, encoding="utf-8")
+    assert parse_srt_realtime_text(srt_path) == "我們在查 我們在要求說"
