@@ -97,13 +97,48 @@ TRANSLATE_REPO_MAP = {
 # ──────────── 錄音設備偵測 ────────────
 def list_audio_devices():
     groups: dict[str, list[tuple[int, int]]] = {}
+    candidates = [
+        8000,
+        11025,
+        16000,
+        22050,
+        24000,
+        32000,
+        44100,
+        48000,
+        88200,
+        96000,
+        192000,
+    ]
     try:
         devs = sd.query_devices()
         for idx, dev in enumerate(devs):
-            if dev["max_input_channels"] > 0:  # 只列輸入設備
+            if dev["max_input_channels"] > 0 and dev["default_samplerate"] > 0:
                 name = dev["name"]
-                sr = int(dev["default_samplerate"])
-                groups.setdefault(name, []).append((idx, sr))
+                srs: set[int] = set()
+                for sr in candidates:
+                    try:
+                        sd.check_input_settings(device=idx, samplerate=sr)
+                    except Exception:
+                        continue
+                    else:
+                        srs.add(int(sr))
+                default_sr = int(dev["default_samplerate"])
+                if default_sr not in srs:
+                    try:
+                        sd.check_input_settings(device=idx, samplerate=default_sr)
+                    except Exception:
+                        pass
+                    else:
+                        srs.add(default_sr)
+                if not srs:
+                    continue
+                ordered = sorted(srs)
+                if default_sr in ordered:
+                    ordered.remove(default_sr)
+                    ordered.insert(0, default_sr)
+                for sr in ordered:
+                    groups.setdefault(name, []).append((idx, sr))
     except Exception as e:
         return [(f"偵測失敗: {e}", [(-1, 16000)])]
     return list(groups.items())
@@ -612,19 +647,17 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.gpu_combo.setEnabled(self.device_combo.currentText().startswith("cuda"))
         form_layout.addRow("GPU", self.gpu_combo)
 
-        # 錄音設備選擇（按鈕觸發偵測）
+        # 錄音設備與取樣率選擇（按鈕觸發偵測）
         self.audio_device_combo = QtWidgets.QComboBox()
         self.audio_list_ready.connect(self._apply_audio_list)
+        self.audio_sr_combo = QtWidgets.QComboBox()
         self.audio_device_btn = QtWidgets.QPushButton("刷新")
         self.audio_device_btn.clicked.connect(self.refresh_audio_devices)
         audio_layout = QtWidgets.QHBoxLayout()
         audio_layout.addWidget(self.audio_device_combo)
+        audio_layout.addWidget(self.audio_sr_combo)
         audio_layout.addWidget(self.audio_device_btn)
         form_layout.addRow("錄音設備", audio_layout)
-
-        # 取樣率選擇
-        self.audio_sr_combo = QtWidgets.QComboBox()
-        form_layout.addRow("取樣率", self.audio_sr_combo)
 
         # VAD 控制
         self.vad_combo = QtWidgets.QComboBox()
@@ -762,7 +795,13 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.gpu_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.audio_device_combo.currentIndexChanged.connect(self._update_sr_combo)
         self.audio_device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.audio_device_combo.currentTextChanged.connect(
+            lambda text: self.audio_device_combo.setToolTip(text)
+        )
         self.audio_sr_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.audio_sr_combo.currentTextChanged.connect(
+            lambda text: self.audio_sr_combo.setToolTip(text)
+        )
         self.vad_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.silence_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
         # 主視窗移動/縮放 → autosave main_window_geometry
@@ -1338,6 +1377,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
         if items:
             for name, pairs in items:
                 self.audio_device_combo.addItem(name, pairs)
+                idx = self.audio_device_combo.count() - 1
+                self.audio_device_combo.setItemData(idx, name, QtCore.Qt.ToolTipRole)
         else:
             self.audio_device_combo.addItem("偵測失敗", [(-1, 16000)])
         if self._pending_audio_dev:
@@ -1349,6 +1390,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 self.audio_device_combo.setCurrentIndex(idx)
             self._pending_audio_dev = None
         self._update_sr_combo()
+        self.audio_device_combo.setToolTip(self.audio_device_combo.currentText())
         if self._pending_audio_sr is not None:
             val, idx = self._pending_audio_sr
             j = self.audio_sr_combo.findData(val) if val is not None else -1
@@ -1363,9 +1405,17 @@ class BootstrapWin(QtWidgets.QMainWindow):
         data = self.audio_device_combo.currentData()
         if not data:
             return
-        srs = sorted({sr for _, sr in data})
+        srs: list[int] = []
+        for _, sr in data:
+            if sr not in srs:
+                srs.append(sr)
         for sr in srs:
             self.audio_sr_combo.addItem(f"{sr} Hz", sr)
+        default_sr = data[0][1]
+        j = self.audio_sr_combo.findData(default_sr)
+        if j >= 0:
+            self.audio_sr_combo.setCurrentIndex(j)
+        self.audio_sr_combo.setToolTip(self.audio_sr_combo.currentText())
 
     def detect_noise_level(self):
         data = self.audio_device_combo.currentData() or [(-1, 16000)]
