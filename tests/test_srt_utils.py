@@ -39,3 +39,14 @@ def test_parse_srt_realtime_text(tmp_path):
     srt.write_text(content, encoding="utf-8")
     assert parse_srt_realtime_text(srt) == "Hello World"
     assert parse_srt_realtime_text(srt, max_chars=5) == "World"
+
+
+def test_parse_srt_realtime_text_dedup(tmp_path):
+    content = (
+        "1\n00:00:00,000 --> 00:00:01,000\nHello\n\n"
+        "1\n00:00:00,000 --> 00:00:01,000\nHello\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\nWorld\n"
+    )
+    srt = tmp_path / "d.srt"
+    srt.write_text(content, encoding="utf-8")
+    assert parse_srt_realtime_text(srt) == "Hello World"

@@ -42,6 +42,9 @@ def parse_srt_last_text(path: Path) -> str:
 def parse_srt_realtime_text(path: Path, max_chars: int = 1200) -> str:
     """Join all subtitle texts and return the tail trimmed on line boundaries.
 
+    Consecutive blocks with identical text or identical index/timecode are
+    ignored to avoid duplicate lines emitted by some realtime recognizers.
+
     Parameters
     ----------
     path:
@@ -62,16 +65,34 @@ def parse_srt_realtime_text(path: Path, max_chars: int = 1200) -> str:
     tc_pat = re.compile(
         r"^\s*(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3}).*$"
     )
-    lines = []
-    for raw in txt.splitlines():
-        line = raw.rstrip("\r")
-        if not line.strip():
+    blocks = re.split(r"\n\s*\n", txt.strip())
+    lines: list[str] = []
+    last_text = ""
+    last_idx = None
+    last_tc = None
+    for blk in blocks:
+        raw_lines = [l.rstrip("\r") for l in blk.splitlines() if l.strip()]
+        if not raw_lines:
             continue
-        if line.lstrip().isdigit():
+        idx = None
+        tc = None
+        i = 0
+        if raw_lines and raw_lines[0].lstrip().isdigit():
+            idx = raw_lines[0].strip()
+            i += 1
+        if i < len(raw_lines) and tc_pat.match(raw_lines[i]):
+            tc = raw_lines[i].strip()
+            i += 1
+        text = "\n".join(raw_lines[i:]).strip()
+        if not text:
             continue
-        if tc_pat.match(line):
+        if text == last_text or (idx == last_idx and tc == last_tc):
             continue
-        lines.append(line)
+        lines.append(text)
+        last_text = text
+        last_idx = idx
+        last_tc = tc
+
     joined = "\n".join(lines).strip()
     if max_chars > 0 and len(joined) > max_chars:
         cutoff = len(joined) - max_chars
