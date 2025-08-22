@@ -68,6 +68,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self._current_text = ""
         self._resize_origin = None
         self._resize_rect = None
+        self._resize_zone = None
         self.RESIZE_MARGIN = 12
         self.MIN_W, self.MIN_H = self.BASE_MIN_W, self.BASE_MIN_H
         self.setWindowFlags(
@@ -231,13 +232,16 @@ class SubtitleOverlay(QtWidgets.QLabel):
     # 拖曳移動
     def mousePressEvent(self, ev: QtGui.QMouseEvent):
         if ev.button() == QtCore.Qt.LeftButton:
-            if (
-                self.settings.strategy == "realtime"
-                and self._in_resize_zone(ev.pos())
-            ):
+            zone = (
+                self._resize_hit_test(ev.pos())
+                if self.settings.strategy == "realtime"
+                else None
+            )
+            if zone:
                 self._resize_origin = ev.globalPos()
                 self._resize_rect = self.geometry()
-                self.setCursor(QtCore.Qt.SizeFDiagCursor)
+                self._resize_zone = zone
+                self.setCursor(self._cursor_for_zone(zone))
                 ev.accept()
             else:
                 self._drag_pos = ev.globalPos() - self.frameGeometry().topLeft()
@@ -249,19 +253,32 @@ class SubtitleOverlay(QtWidgets.QLabel):
             ev.buttons() & QtCore.Qt.LeftButton
             and self._resize_origin is not None
             and self._resize_rect is not None
+            and self._resize_zone is not None
         ):
             delta = ev.globalPos() - self._resize_origin
-            new_w = max(self.MIN_W, self._resize_rect.width() + delta.x())
-            new_h = max(self.MIN_H, self._resize_rect.height() + delta.y())
-            self.resize(new_w, new_h)
+            r = QtCore.QRect(self._resize_rect)
+            if "left" in self._resize_zone:
+                new_left = min(r.left() + delta.x(), r.right() - self.MIN_W)
+                r.setLeft(new_left)
+            if "right" in self._resize_zone:
+                new_right = max(r.left() + self.MIN_W, r.right() + delta.x())
+                r.setRight(new_right)
+            if "top" in self._resize_zone:
+                new_top = min(r.top() + delta.y(), r.bottom() - self.MIN_H)
+                r.setTop(new_top)
+            if "bottom" in self._resize_zone:
+                new_bottom = max(r.top() + self.MIN_H, r.bottom() + delta.y())
+                r.setBottom(new_bottom)
+            self.setGeometry(r)
             ev.accept()
             return
         if ev.buttons() & QtCore.Qt.LeftButton and self._drag_pos is not None:
             self.move(ev.globalPos() - self._drag_pos)
             ev.accept()
             return
-        if self.settings.strategy == "realtime" and self._in_resize_zone(ev.pos()):
-            self.setCursor(QtCore.Qt.SizeFDiagCursor)
+        if self.settings.strategy == "realtime":
+            zone = self._resize_hit_test(ev.pos())
+            self.setCursor(self._cursor_for_zone(zone))
         else:
             self.setCursor(QtCore.Qt.ArrowCursor)
 
@@ -270,6 +287,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
             if self._resize_origin is not None:
                 self._resize_origin = None
                 self._resize_rect = None
+                self._resize_zone = None
                 self.setCursor(QtCore.Qt.ArrowCursor)
                 ev.accept()
                 return
@@ -286,11 +304,42 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self.border_visible = False
         self.update()
 
-    def _in_resize_zone(self, pos: QtCore.QPoint) -> bool:
-        return (
-            self.width() - pos.x() <= self.RESIZE_MARGIN
-            and self.height() - pos.y() <= self.RESIZE_MARGIN
-        )
+    def _resize_hit_test(self, pos: QtCore.QPoint) -> str | None:
+        m = self.RESIZE_MARGIN
+        x, y = pos.x(), pos.y()
+        w, h = self.width(), self.height()
+        left = x <= m
+        right = w - x <= m
+        top = y <= m
+        bottom = h - y <= m
+        if top and left:
+            return "top_left"
+        if top and right:
+            return "top_right"
+        if bottom and left:
+            return "bottom_left"
+        if bottom and right:
+            return "bottom_right"
+        if top:
+            return "top"
+        if bottom:
+            return "bottom"
+        if left:
+            return "left"
+        if right:
+            return "right"
+        return None
+
+    def _cursor_for_zone(self, zone: str | None) -> QtCore.Qt.CursorShape:
+        if zone in {"top_left", "bottom_right"}:
+            return QtCore.Qt.SizeFDiagCursor
+        if zone in {"top_right", "bottom_left"}:
+            return QtCore.Qt.SizeBDiagCursor
+        if zone in {"left", "right"}:
+            return QtCore.Qt.SizeHorCursor
+        if zone in {"top", "bottom"}:
+            return QtCore.Qt.SizeVerCursor
+        return QtCore.Qt.ArrowCursor
 
     def paintEvent(self, _ev):
         p = QtGui.QPainter(self)
@@ -304,8 +353,12 @@ class SubtitleOverlay(QtWidgets.QLabel):
         rect = rect.translated(offx, offy)
         text = self.text()
         flags = int(self.alignment())
+        draw_rect = rect
         if self.settings.strategy == "realtime":
             flags |= QtCore.Qt.TextWordWrap
+            text_rect = p.boundingRect(rect, QtCore.Qt.TextWordWrap, text)
+            draw_rect = QtCore.QRect(rect)
+            draw_rect.setTop(rect.bottom() - text_rect.height())
 
         if self.settings.shadow_enabled and text:
             base = QtGui.QColor(self.settings.shadow_color)
@@ -325,7 +378,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
             sc = QtGui.QColor(base)
             sc.setAlphaF(a)
             p.setPen(sc)
-            p.drawText(rect.translated(dist, dist), flags, text)
+            p.drawText(draw_rect.translated(dist, dist), flags, text)
             for r in range(1, blur + 1):
                 fall = a * (1 - r / (blur + 1)) ** 2
                 sc = QtGui.QColor(base)
@@ -333,7 +386,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
                 for ox, oy in directions:
                     p.setPen(sc)
                     p.drawText(
-                        rect.translated(dist + ox * r, dist + oy * r),
+                        draw_rect.translated(dist + ox * r, dist + oy * r),
                         flags,
                         text,
                     )
@@ -345,9 +398,9 @@ class SubtitleOverlay(QtWidgets.QLabel):
                 for dy in range(-w, w + 1):
                     if dx == 0 and dy == 0:
                         continue
-                    p.drawText(rect.translated(dx, dy), flags, text)
+                    p.drawText(draw_rect.translated(dx, dy), flags, text)
         p.setPen(self._effective_color())
-        p.drawText(rect, flags, text)
+        p.drawText(draw_rect, flags, text)
         if self.border_visible:
             pen = QtGui.QPen(QtGui.QColor("#CCCCCC"))
             pen.setWidth(2)
@@ -432,6 +485,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
             self.repaint()
             return
         if self.settings.strategy == "realtime":
+            text = text.replace("\n", " ")
             if not text.strip():
                 self._current_text = ""
                 self.setText("")

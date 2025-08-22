@@ -80,7 +80,7 @@ def parse_srt_realtime_text(path: Path, max_chars: int = 1200) -> str:
             joined = joined[nl + 1 :]
         else:
             joined = joined[-max_chars:]
-    return joined
+    return joined.replace("\n", " ")
 
 
 class LiveSRTWatcher(QtCore.QObject):
