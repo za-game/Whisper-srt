@@ -2036,6 +2036,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 # 隱藏主控台
                 creationflags |= subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
             popen_kwargs["creationflags"] = creationflags
+        if not self.console_chk.isChecked():
+            popen_kwargs.update(
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         # 非 Windows：不特別處理 console 視窗（由桌面環境決定），但仍會把 --log 傳給子程式（若有勾選）
         self.proc = subprocess.Popen([sys.executable, str(ENGINE_PY)] + args, **popen_kwargs)
         self.start_btn.setEnabled(False)
@@ -2054,7 +2060,14 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.overlay.show()  # 出現到桌面
         self.overlay.show_entry_text("")
         if self.tray is None:
-            self.tray = Tray(self.settings, self.overlay, parent=self, on_stop=self.stop_clicked)
+            self.tray = Tray(
+                self.settings,
+                self.overlay,
+                parent=self,
+                on_start=self.start_clicked,
+                on_stop=self.stop_clicked,
+            )
+        self.tray.set_running(True)
         self.hide()
         # 監看設定中的 srt_path → 更新最後一行到 overlay
         srt_path = self.settings.srt_path
@@ -2169,6 +2182,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 清一下 overlay 畫面（保留視窗，避免第二次設定要再叫出）
         if self.overlay:
             self.overlay.show_entry_text("")
+        if getattr(self, "tray", None):
+            self.tray.set_running(False)
 
     def exit_clicked(self):
         if self.proc:

@@ -782,7 +782,14 @@ class TextStyleDialog(QtWidgets.QDialog):
         self.preview.update()
 
 class Tray(QtWidgets.QSystemTrayIcon):
-    def __init__(self, settings: Settings, overlay: SubtitleOverlay, parent=None, on_stop=None):
+    def __init__(
+        self,
+        settings: Settings,
+        overlay: SubtitleOverlay,
+        parent=None,
+        on_start=None,
+        on_stop=None,
+    ):
         icon = QtGui.QIcon.fromTheme("dialog-information")
         if icon.isNull():
             icon = QtWidgets.QApplication.style().standardIcon(
@@ -790,7 +797,7 @@ class Tray(QtWidgets.QSystemTrayIcon):
             )
         super().__init__(icon, parent)
         self.settings, self.overlay, self.parent_window = settings, overlay, parent
-        self.on_stop = on_stop
+        self.on_start, self.on_stop = on_start, on_stop
         self.setToolTip("SRT Overlay")
         self._build_menu()
         self.show()
@@ -875,10 +882,13 @@ class Tray(QtWidgets.QSystemTrayIcon):
             )
             grp.addAction(act)
         menu.addSeparator()
-        # 停止轉寫
-        stop_act = menu.addAction("停止轉寫")
+        # 開始/停止轉寫
+        self.start_act = menu.addAction("開始轉寫")
+        if self.on_start:
+            self.start_act.triggered.connect(self.on_start)
+        self.stop_act = menu.addAction("停止轉寫")
         if self.on_stop:
-            stop_act.triggered.connect(self.on_stop)
+            self.stop_act.triggered.connect(self.on_stop)
         menu.addSeparator()
         quit_act = menu.addAction("結束")
 
@@ -893,6 +903,10 @@ class Tray(QtWidgets.QSystemTrayIcon):
 
         quit_act.triggered.connect(_quit)
         self.setContextMenu(menu)
+
+    def set_running(self, running: bool):
+        self.start_act.setEnabled(not running)
+        self.stop_act.setEnabled(running)
 
     def _set_cps(self):
         val, ok = QtWidgets.QInputDialog.getDouble(
