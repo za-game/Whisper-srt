@@ -1063,7 +1063,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         payload = {
             "app": "WhisperLiveCaption",
             "settings": {
-                "strategy": getattr(self.settings, "strategy", "overlay"),
+                "strategy": getattr(self.settings, "strategy", "smart"),
                 "cps": float(getattr(self.settings, "cps", 15)),
                 "fixed": float(getattr(self.settings, "fixed", 2)),
                 "preview": bool(getattr(self.settings, "preview", False)),

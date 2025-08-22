@@ -12,7 +12,9 @@ class Settings(QtCore.QObject):
 
     def __init__(self):
         super().__init__()
-        self.strategy = self._qs.value("strategy", "overlay")  # "cps" | "fixed" | "overlay"
+        self.strategy = self._qs.value(
+            "strategy", "smart"
+        )  # "smart" | "cps" | "fixed" | "overlay" | "none"
         self.cps = float(self._qs.value("cps", 15))
         self.fixed = float(self._qs.value("fixed", 2))
         self.font = self._qs.value("font", QtGui.QFont("Arial", 32), type=QtGui.QFont)
@@ -345,6 +347,17 @@ class SubtitleOverlay(QtWidgets.QLabel):
             y -= dy // 2
         self.setGeometry(int(x), int(y), int(w), int(h))
 
+    def _smart_duration_ms(self, text: str) -> int:
+        cps = max(1.0, float(getattr(self.settings, "cps", 15)))
+        base = len(text) / cps * 1000
+        bonus = 0
+        if text.endswith(("。", "！", "？", "!", "?", ".")):
+            bonus = 500
+        elif text.endswith(("，", "、", ",", ":", "；", ";")):
+            bonus = 250
+        ms = base + bonus
+        return int(min(max(ms, 1500), 6000))
+
     def show_entry_text(self, text: str):
         # 預覽優先：勾選預覽時永遠顯示預覽文字
         if self.settings.preview:
@@ -379,6 +392,8 @@ class SubtitleOverlay(QtWidgets.QLabel):
             self.display_timer.start(ms)
         elif self.settings.strategy == "fixed":
             self.display_timer.start(int(self.settings.fixed * 1000))
+        elif self.settings.strategy == "smart":
+            self.display_timer.start(self._smart_duration_ms(text))
         else:
             self.display_timer.stop()
 
@@ -637,7 +652,7 @@ class Tray(QtWidgets.QSystemTrayIcon):
         self.menu = QtWidgets.QMenu()
         menu = self.menu
 
-        # 顯示策略子選單（cps / fixed / overlay）
+        # 顯示策略子選單（smart / cps / fixed / overlay）
         strat_menu = menu.addMenu("顯示策略")
         strat_grp = QtWidgets.QActionGroup(strat_menu)
         strat_grp.setExclusive(True)
@@ -646,6 +661,7 @@ class Tray(QtWidgets.QSystemTrayIcon):
         fixed_act = strat_menu.addAction("設定 fixed 秒數…")
         fixed_act.triggered.connect(self._set_fixed)
         for name, label in (
+            ("smart", "智慧顯示（自動時間）"),
             ("cps", "cps（單行字元×秒數）"),
             ("fixed", "fixed（每行固定秒數）"),
             ("overlay", "overlay（直到下行）"),
