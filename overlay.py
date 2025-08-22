@@ -481,7 +481,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self._visible_lines = visible
         added = max(0, len(visible) - len(prev))
         if added == 0 and len(visible) == len(prev):
-            for i in range(1, len(prev)):
+            for i in range(1, len(prev) + 1):
                 if visible[:-i] == prev[i:]:
                     added = i
                     break
