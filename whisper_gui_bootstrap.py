@@ -96,16 +96,17 @@ TRANSLATE_REPO_MAP = {
 
 # ──────────── 錄音設備偵測 ────────────
 def list_audio_devices():
-    devices = []
+    groups: dict[str, list[tuple[int, int]]] = {}
     try:
         devs = sd.query_devices()
         for idx, dev in enumerate(devs):
             if dev["max_input_channels"] > 0:  # 只列輸入設備
+                name = dev["name"]
                 sr = int(dev["default_samplerate"])
-                devices.append((idx, f"{dev['name']} ({sr} Hz)", sr))
+                groups.setdefault(name, []).append((idx, sr))
     except Exception as e:
-        devices.append((-1, f"偵測失敗: {e}", 16000))
-    return devices
+        return [(f"偵測失敗: {e}", [(-1, 16000)])]
+    return list(groups.items())
 
 
 def _calc_rms(audio) -> float:
@@ -621,6 +622,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
         audio_layout.addWidget(self.audio_device_btn)
         form_layout.addRow("錄音設備", audio_layout)
 
+        # 取樣率選擇
+        self.audio_sr_combo = QtWidgets.QComboBox()
+        form_layout.addRow("取樣率", self.audio_sr_combo)
+
         # VAD 控制
         self.vad_combo = QtWidgets.QComboBox()
         self.vad_combo.addItems(["0", "1", "2", "3", "Auto"])
@@ -755,7 +760,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.zh_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.device_combo.currentIndexChanged.connect(self.device_changed)
         self.gpu_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.audio_device_combo.currentIndexChanged.connect(self._update_sr_combo)
         self.audio_device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.audio_sr_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.vad_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.silence_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
         # 主視窗移動/縮放 → autosave main_window_geometry
@@ -763,6 +770,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 啟動時嘗試還原上次專案（使用全域 QSettings）
         QtCore.QTimer.singleShot(0, self._auto_open_last_project)
         self._initial_checks_done = False
+        self._pending_audio_dev: tuple[str | None, int | None] | None = None
+        self._pending_audio_sr: tuple[int | None, int | None] | None = None
         # —— 統一的本地模型資料夾：model_path/<Repo> —— #
 
     def showEvent(self, ev: QtGui.QShowEvent) -> None:  # type: ignore[override]
@@ -1090,6 +1099,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 "gpu_index": self.gpu_combo.currentIndex(),
                 "audio_device_text": self.audio_device_combo.currentText(),
                 "audio_device_index": self.audio_device_combo.currentIndex(),
+                "audio_sr_index": self.audio_sr_combo.currentIndex(),
+                "audio_sr_value": self.audio_sr_combo.currentData(),
                 "vad": self.vad_combo.currentText(),
                 "mic_gate": int(self.mic_slider.value()),
                 "silence": float(self.silence_spin.value()),
@@ -1168,14 +1179,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 except Exception: pass
             audio_text = gui.get("audio_device_text")
             audio_idx = gui.get("audio_device_index")
-            if audio_text:
-                i = self.audio_device_combo.findText(audio_text)
-                if i >= 0:
-                    self.audio_device_combo.setCurrentIndex(i)
-                elif isinstance(audio_idx, int) and 0 <= audio_idx < self.audio_device_combo.count():
-                    self.audio_device_combo.setCurrentIndex(audio_idx)
-            elif isinstance(audio_idx, int) and 0 <= audio_idx < self.audio_device_combo.count():
-                self.audio_device_combo.setCurrentIndex(audio_idx)
+            sr_idx = gui.get("audio_sr_index")
+            sr_val = gui.get("audio_sr_value")
+            self._pending_audio_dev = (audio_text, audio_idx)
+            self._pending_audio_sr = (sr_val, sr_idx)
             hot_proj_name = gui.get("hot_proj_name")
             if hot_proj_name:
                 self.hot_proj_name_edit.setText(hot_proj_name)
@@ -1215,6 +1222,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.status.appendPlainText(f"[Load] {p}")
         except Exception as e:
             self.status.appendPlainText(f"[Load] 失敗: {e}")
+        self.refresh_audio_devices()
         self._refresh_model_items()
 
     def schedule_autosave(self, delay_ms: int = 300):
@@ -1314,7 +1322,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
     def refresh_audio_devices(self):
         self.audio_device_combo.clear()
-        self.audio_device_combo.addItem("掃描中…", (-1, 16000))
+        self.audio_device_combo.addItem("掃描中…", [])
+        self.audio_sr_combo.clear()
+        self.audio_sr_combo.addItem("…", 16000)
 
         def worker():
             devices = list_audio_devices()
@@ -1323,17 +1333,44 @@ class BootstrapWin(QtWidgets.QMainWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     @QtCore.pyqtSlot(list)
-    def _apply_audio_list(self, items: list[tuple[int, str, int]]):
+    def _apply_audio_list(self, items: list[tuple[str, list[tuple[int, int]]]]):
         self.audio_device_combo.clear()
         if items:
-            for idx, label, sr in items:
-                self.audio_device_combo.addItem(label, (idx, sr))
+            for name, pairs in items:
+                self.audio_device_combo.addItem(name, pairs)
         else:
-            self.audio_device_combo.addItem("偵測失敗", (-1, 16000))
+            self.audio_device_combo.addItem("偵測失敗", [(-1, 16000)])
+        if self._pending_audio_dev:
+            text, idx = self._pending_audio_dev
+            i = self.audio_device_combo.findText(text) if text else -1
+            if i >= 0:
+                self.audio_device_combo.setCurrentIndex(i)
+            elif isinstance(idx, int) and 0 <= idx < self.audio_device_combo.count():
+                self.audio_device_combo.setCurrentIndex(idx)
+            self._pending_audio_dev = None
+        self._update_sr_combo()
+        if self._pending_audio_sr is not None:
+            val, idx = self._pending_audio_sr
+            j = self.audio_sr_combo.findData(val) if val is not None else -1
+            if j >= 0:
+                self.audio_sr_combo.setCurrentIndex(j)
+            elif isinstance(idx, int) and 0 <= idx < self.audio_sr_combo.count():
+                self.audio_sr_combo.setCurrentIndex(idx)
+            self._pending_audio_sr = None
+
+    def _update_sr_combo(self):
+        self.audio_sr_combo.clear()
+        data = self.audio_device_combo.currentData()
+        if not data:
+            return
+        srs = sorted({sr for _, sr in data})
+        for sr in srs:
+            self.audio_sr_combo.addItem(f"{sr} Hz", sr)
 
     def detect_noise_level(self):
-        dev_data = self.audio_device_combo.currentData()
-        dev_id, sr = dev_data if dev_data is not None else (-1, 16000)
+        data = self.audio_device_combo.currentData() or [(-1, 16000)]
+        sr = self.audio_sr_combo.currentData() or 16000
+        dev_id = next((idx for idx, s in data if s == sr), data[0][0])
         duration = 15
         self._ui_log("偵測噪音等級中…")
         try:
@@ -1361,8 +1398,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
             return
         if self._level_thread and self._level_thread.is_alive():
             return
-        dev_data = self.audio_device_combo.currentData()
-        dev_id, sr = dev_data if dev_data is not None else (-1, 16000)
+        data = self.audio_device_combo.currentData() or [(-1, 16000)]
+        sr = self.audio_sr_combo.currentData() or 16000
+        dev_id = next((idx for idx, s in data if s == sr), data[0][0])
 
         def worker() -> None:
             try:
@@ -1897,9 +1935,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
             args += ["--gpu", "-1"]
 
         # 錄音設備 ID 與採樣率
-        dev_data = self.audio_device_combo.currentData()
-        if dev_data is not None:
-            dev_id, sr = dev_data
+        data = self.audio_device_combo.currentData()
+        sr = self.audio_sr_combo.currentData()
+        if data and sr is not None:
+            dev_id = next((idx for idx, s in data if s == sr), data[0][0])
             args += ["--device", str(dev_id), "--sr", str(sr)]
         else:
             args += ["--sr", "auto"]
