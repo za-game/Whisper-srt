@@ -39,10 +39,45 @@ def parse_srt_last_text(path: Path) -> str:
     return "\n".join(lines).strip()
 
 
+def parse_srt_realtime_text(path: Path, max_chars: int = 120) -> str:
+    """Join all subtitle texts and return the last ``max_chars`` characters."""
+
+    try:
+        txt = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return ""
+    if not txt.strip():
+        return ""
+    txt = txt.replace("\ufeff", "")
+    tc_pat = re.compile(
+        r"^\s*(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3}).*$"
+    )
+    lines = []
+    for raw in txt.splitlines():
+        line = raw.rstrip("\r")
+        if not line.strip():
+            continue
+        if line.lstrip().isdigit():
+            continue
+        if tc_pat.match(line):
+            continue
+        lines.append(line)
+    joined = " ".join(lines).strip()
+    if max_chars > 0 and len(joined) > max_chars:
+        return joined[-max_chars:]
+    return joined
+
+
 class LiveSRTWatcher(QtCore.QObject):
     updated = QtCore.pyqtSignal(str)  # text
 
-    def __init__(self, srt_path: Path, parent=None, initial_emit: bool = False):
+    def __init__(
+        self,
+        srt_path: Path,
+        parent=None,
+        initial_emit: bool = False,
+        mode: str = "last",
+    ):
         super().__init__(parent)
         self.srt_path = Path(srt_path).resolve()
         if not self.srt_path.exists():
@@ -67,9 +102,20 @@ class LiveSRTWatcher(QtCore.QObject):
             QtCore.QTimer.singleShot(0, self._emit_latest)
 
         self._last_text = ""
+        self.mode = mode
+
+    def set_mode(self, mode: str):
+        if mode not in {"last", "realtime"}:
+            mode = "last"
+        if self.mode != mode:
+            self.mode = mode
+            self._emit_latest()
 
     def _emit_latest(self):
-        text = parse_srt_last_text(self.srt_path)
+        if self.mode == "realtime":
+            text = parse_srt_realtime_text(self.srt_path)
+        else:
+            text = parse_srt_last_text(self.srt_path)
         if text == self._last_text:
             return
         self._last_text = text

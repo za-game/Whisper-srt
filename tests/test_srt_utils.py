@@ -2,7 +2,7 @@ from pathlib import Path
 import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
-from srt_utils import parse_srt_last_text
+from srt_utils import parse_srt_last_text, parse_srt_realtime_text
 
 
 def test_parse_srt_last_text_basic(tmp_path):
@@ -28,3 +28,14 @@ def test_parse_srt_last_text_bom_and_blank(tmp_path):
     empty = tmp_path / "empty.srt"
     empty.write_text("\n", encoding="utf-8")
     assert parse_srt_last_text(empty) == ""
+
+
+def test_parse_srt_realtime_text(tmp_path):
+    content = (
+        "1\n00:00:00,000 --> 00:00:01,000\nHello\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\nWorld\n"
+    )
+    srt = tmp_path / "c.srt"
+    srt.write_text(content, encoding="utf-8")
+    assert parse_srt_realtime_text(srt) == "Hello World"
+    assert parse_srt_realtime_text(srt, max_chars=5) == "World"

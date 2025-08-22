@@ -14,7 +14,7 @@ class Settings(QtCore.QObject):
         super().__init__()
         self.strategy = self._qs.value(
             "strategy", "smart"
-        )  # "smart" | "cps" | "fixed" | "overlay" | "none"
+        )  # "smart" | "cps" | "fixed" | "overlay" | "realtime" | "none"
         self.cps = float(self._qs.value("cps", 15))
         self.fixed = float(self._qs.value("fixed", 2))
         self.font = self._qs.value("font", QtGui.QFont("Arial", 32), type=QtGui.QFont)
@@ -401,7 +401,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
         if self.settings.preview:
             self.show_entry_text(self.settings.preview_text)
             return
-        if "overlay" != self.settings.strategy:
+        if self.settings.strategy not in {"overlay", "realtime"}:
             self._current_text = ""
             self.setText("")
             self._resize_keep_anchor(self.minimumWidth(), self.minimumHeight())
@@ -652,7 +652,7 @@ class Tray(QtWidgets.QSystemTrayIcon):
         self.menu = QtWidgets.QMenu()
         menu = self.menu
 
-        # 顯示策略子選單（smart / cps / fixed / overlay）
+        # 顯示策略子選單（smart / cps / fixed / overlay / realtime）
         strat_menu = menu.addMenu("顯示策略")
         strat_grp = QtWidgets.QActionGroup(strat_menu)
         strat_grp.setExclusive(True)
@@ -665,6 +665,7 @@ class Tray(QtWidgets.QSystemTrayIcon):
             ("cps", "cps（單行字元×秒數）"),
             ("fixed", "fixed（每行固定秒數）"),
             ("overlay", "overlay（直到下行）"),
+            ("realtime", "realtime（即時修正）"),
             ("none", "不顯示字幕（OBS 模式）"),
         ):
             act = strat_menu.addAction(label)

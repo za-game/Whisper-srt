@@ -784,6 +784,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self._level_thread = None
         # 設定變更 → 觸發自動儲存（debounce）
         self.settings.changed.connect(lambda: self.schedule_autosave(300))
+        self.settings.changed.connect(self._settings_changed)
         # GUI 欄位變更也要 autosave
         self.hotwords_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.srt_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
@@ -1254,7 +1255,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     except Exception: pass
                     self.srt_watcher = None
                 self.srt_watcher = LiveSRTWatcher(
-                    self.settings.srt_path, self, initial_emit=True
+                    self.settings.srt_path,
+                    self,
+                    initial_emit=True,
+                    mode=self._watch_mode(),
                 )
                 if self.overlay:
                     self.srt_watcher.updated.connect(self.overlay.show_entry_text)
@@ -1273,6 +1277,13 @@ class BootstrapWin(QtWidgets.QMainWindow):
             return
         self._autosave_pending = False
         self._write_project()
+
+    def _watch_mode(self) -> str:
+        return "realtime" if getattr(self.settings, "strategy", "") == "realtime" else "last"
+
+    def _settings_changed(self):
+        if self.srt_watcher:
+            self.srt_watcher.set_mode(self._watch_mode())
 
     def eventFilter(self, obj, ev):
         t = ev.type()
@@ -1315,7 +1326,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 except Exception: pass
                 self.srt_watcher = None
             self.srt_watcher = LiveSRTWatcher(
-                self.settings.srt_path, self, initial_emit=True
+                self.settings.srt_path,
+                self,
+                initial_emit=True,
+                mode=self._watch_mode(),
             )
             if self.overlay:
                 self.srt_watcher.updated.connect(self.overlay.show_entry_text)
@@ -1573,7 +1587,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 pass
             self.srt_watcher = None
         self.srt_watcher = LiveSRTWatcher(
-            self.settings.srt_path, self, initial_emit=True
+            self.settings.srt_path,
+            self,
+            initial_emit=True,
+            mode=self._watch_mode(),
         )
         if self.overlay:
             self.srt_watcher.updated.connect(self.overlay.show_entry_text)
@@ -2043,7 +2060,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
         srt_path = self.settings.srt_path
         if self.srt_watcher is None:
             self.srt_watcher = LiveSRTWatcher(
-                srt_path, self, initial_emit=True
+                srt_path,
+                self,
+                initial_emit=True,
+                mode=self._watch_mode(),
             )
         else:
             # 若 path 變了，換一個新的 watcher（避免舊 watcher 卡在舊路徑）
@@ -2053,7 +2073,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 except Exception:
                     pass
                 self.srt_watcher = LiveSRTWatcher(
-                    srt_path, self, initial_emit=True
+                    srt_path,
+                    self,
+                    initial_emit=True,
+                    mode=self._watch_mode(),
                 )
         # ── Fallback：當專案檔沒記錄 hotwords/srt 時，從專案資料夾補上；再不行就維持預設 ──
     def _fallback_fill_paths_from_dir(self, d: Path):
@@ -2085,11 +2108,14 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     try: self.srt_watcher.deleteLater()
                     except Exception: pass
                     self.srt_watcher = None
-                self.srt_watcher = LiveSRTWatcher(
-                    self.settings.srt_path, self, initial_emit=True
-                )
-                if self.overlay:
-                    self.srt_watcher.updated.connect(self.overlay.show_entry_text)
+            self.srt_watcher = LiveSRTWatcher(
+                self.settings.srt_path,
+                self,
+                initial_emit=True,
+                mode=self._watch_mode(),
+            )
+            if self.overlay:
+                self.srt_watcher.updated.connect(self.overlay.show_entry_text)
                 self._ui_log(f"專案 SRT：{srt}")
         # 關鍵：不管 watcher 何時建立，都要**確保**把 updated 接到 overlay
         if self.srt_watcher and self.overlay:
