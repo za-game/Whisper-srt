@@ -42,8 +42,10 @@ def parse_srt_last_text(path: Path) -> str:
 def parse_srt_realtime_text(path: Path, max_chars: int = 1200) -> str:
     """Join all subtitle texts and return the tail trimmed on line boundaries.
 
-    Consecutive blocks with identical text or identical index/timecode are
-    ignored to avoid duplicate lines emitted by some realtime recognizers.
+    Consecutive blocks with identical text are ignored.  When a new block
+    repeats the previous index/timecode with different text, it replaces the
+    prior entry so that intermediate candidates are overwritten by the final
+    subtitle.
 
     Parameters
     ----------
@@ -86,7 +88,14 @@ def parse_srt_realtime_text(path: Path, max_chars: int = 1200) -> str:
         text = "\n".join(raw_lines[i:]).strip()
         if not text:
             continue
-        if text == last_text or (idx == last_idx and tc == last_tc):
+        if text == last_text:
+            continue
+        if idx == last_idx and tc == last_tc:
+            if lines:
+                lines[-1] = text
+            else:
+                lines.append(text)
+            last_text = text
             continue
         lines.append(text)
         last_text = text
