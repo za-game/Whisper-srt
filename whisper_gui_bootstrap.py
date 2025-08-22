@@ -85,7 +85,6 @@ TORCH_PROBE_SERIES = ["", "~=2.8", "~=2.7", "~=2.6"]
 
 def _torch_version():
     try:
-        sys.modules.pop("torch", None)
         ver = metadata.version("torch")
         return version.parse(ver.split("+")[0])
     except Exception:
