@@ -45,8 +45,8 @@ def parse_srt_realtime_text(path: Path, max_chars: int = 1200) -> str:
     Consecutive blocks with identical text are ignored. When a new block
     repeats the previous index/timecode with different text, it replaces the
     prior entry so that intermediate candidates are overwritten by the final
-    subtitle.  Overlapping words across neighbouring blocks are merged so that
-    sliding-window duplication is removed.
+    subtitle.  Overlapping content across neighbouring blocks is merged so that
+    sliding-window duplication is removed even for languages without spaces.
 
     Parameters
     ----------
@@ -96,23 +96,28 @@ def parse_srt_realtime_text(path: Path, max_chars: int = 1200) -> str:
             entries.append((idx, tc, text))
         last_text = text
 
-    words: list[str] = []
+    joined = ""
     for _, _, text in entries:
-        new_words = text.replace("\n", " ").split()
-        if not new_words:
+        if not text:
             continue
-        if not words:
-            words.extend(new_words)
+        seg = text.replace("\n", " ")
+        seg = " ".join(seg.split())  # normalize spaces
+        if not seg:
             continue
-        max_overlap = min(len(words), len(new_words))
+        if not joined:
+            joined = seg
+            continue
+        max_overlap = min(len(joined), len(seg))
         overlap = 0
         for k in range(max_overlap, 0, -1):
-            if words[-k:] == new_words[:k]:
+            if joined.endswith(seg[:k]):
                 overlap = k
                 break
-        words.extend(new_words[overlap:])
+        if overlap == 0 and not joined.endswith(" "):
+            joined += " "
+        joined += seg[overlap:]
 
-    joined = " ".join(words).strip()
+    joined = joined.strip()
     if max_chars > 0 and len(joined) > max_chars:
         cutoff = len(joined) - max_chars
         sp = joined.find(" ", cutoff)

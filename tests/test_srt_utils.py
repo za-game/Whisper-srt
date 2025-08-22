@@ -82,3 +82,13 @@ def test_parse_srt_realtime_text_overlap_merge(tmp_path):
     srt = tmp_path / "g.srt"
     srt.write_text(content, encoding="utf-8")
     assert parse_srt_realtime_text(srt) == "This is a test of the system"
+
+
+def test_parse_srt_realtime_text_overlap_merge_cjk(tmp_path):
+    content = (
+        "1\n00:00:00,000 --> 00:00:02,000\n檢警還發現其中一名共犯\n\n"
+        "2\n00:00:01,500 --> 00:00:03,000\n發現其中一名共犯\n"
+    )
+    srt = tmp_path / "h.srt"
+    srt.write_text(content, encoding="utf-8")
+    assert parse_srt_realtime_text(srt) == "檢警還發現其中一名共犯"
