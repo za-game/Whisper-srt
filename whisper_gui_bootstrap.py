@@ -1369,7 +1369,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 )
                 sd.wait()
                 rms = _calc_rms(audio)
-                level = min(100, int(rms * 1000))
+                rms_db = 20 * np.log10(rms + 1e-6)
+                level = int(np.clip((rms_db + 60) * (100 / 60), 0, 100))
                 self.mic_level_ready.emit(level)
             except Exception:
                 pass
@@ -1898,7 +1899,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 傳遞 VAD 相關參數（永遠顯式傳遞，避免預設值不明）
         vad_opt = self.vad_combo.currentText()
         if vad_opt == "Auto":
-            args += ["--auto-vad", "--mic-thr", f"{self.mic_slider.value() / 100.0:.3f}"]
+            val = self.mic_slider.value()
+            thr = 0.0 if val == 0 else 10 ** ((val * 0.6 - 60) / 20)
+            args += ["--auto-vad", "--mic-thr", f"{thr:.6f}"]
         else:
             args += ["--vad_level", vad_opt]
         args += ["--silence", f"{self.silence_spin.value():.2f}"]
