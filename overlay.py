@@ -71,38 +71,15 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self.update()
 
     def _start_line_anim(self):
-        # 僅在換行/句完時呼叫
+        """Start scroll animation for newly added lines."""
         try:
             self._scroll_anim.stop()
         except Exception:
-            pass
-        # 由下往上微移入場：正值→0（或反過來，依你的審美）
-        self._scroll_anim.setStartValue(18)   # 進場位移像素，可調
+            return
+        # Move slightly upward from positive offset back to 0.
+        self._scroll_anim.setStartValue(18)  # entrance offset in pixels
         self._scroll_anim.setEndValue(0)
         self._scroll_anim.start()
-
-    def set_subtitle_text(self, text: str):
-        """
-        只在「新增一行」或「句子完結」時觸發動畫；其他同一行補字不動畫。
-        """
-        new_lines = [ln for ln in (text.splitlines()) if ln.strip()]
-        old_lines = getattr(self, "_last_lines", [])
-        # 1) 明確換行（行數增加）
-        newline = len(new_lines) > len(old_lines)
-        # 2) 句子完結（最後一行句末標點）
-        last = (new_lines[-1] if new_lines else "")
-        ended = bool(last) and last[-1] in "，。？！；、,.!?;:…"
-        # 3) 決定是否動畫
-        should_anim = newline or ended
-
-        # 更新文字
-        super().setText(text)
-
-        # 僅在需要時播放
-        if should_anim and self.settings.strategy == "realtime":
-            self._start_line_anim()
-                # 記錄狀態
-        self._last_lines = new_lines
     def __init__(self, settings: Settings):
         super().__init__("")
         self.settings = settings
@@ -214,8 +191,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
             self._anim_offset = 0.0
             self.repaint()
         self._last_layout_line_count = total
-            # 全局視覺行數（用 QTextLayout 排版後的總行數），避免可見區裁切誤觸
-        self._last_layout_line_count = 0
+        # 全局視覺行數（用 QTextLayout 排版後的總行數），避免可見區裁切誤觸
 
     def _layout_line_count(self, text: str, width: int) -> tuple[int, float]:
         """
