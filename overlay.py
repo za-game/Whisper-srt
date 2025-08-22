@@ -443,11 +443,21 @@ class SubtitleOverlay(QtWidgets.QLabel):
             line_h = fm.lineSpacing()
             avail_h = max(1, self.height() - margin)
             max_lines = max(1, avail_h // line_h)
-            avg_w = max(1, fm.averageCharWidth())
-            avail_w = max(1, self.width() - margin)
-            max_chars = max_lines * (avail_w // avg_w) * 2
-            if len(text) > max_chars:
-                text = text[-max_chars:]
+            width = max(1, self.width() - margin)
+            layout = QtGui.QTextLayout(text, self.font())
+            layout.beginLayout()
+            starts = []
+            while True:
+                line = layout.createLine()
+                if not line.isValid():
+                    break
+                line.setLineWidth(width)
+                starts.append(line.textStart())
+            layout.endLayout()
+            limit = max_lines * 2
+            if len(starts) > limit:
+                cutoff = starts[-limit]
+                text = text[cutoff:]
             self._current_text = text
             self._display_realtime()
             self.display_timer.stop()

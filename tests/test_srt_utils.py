@@ -37,5 +37,5 @@ def test_parse_srt_realtime_text(tmp_path):
     )
     srt = tmp_path / "c.srt"
     srt.write_text(content, encoding="utf-8")
-    assert parse_srt_realtime_text(srt) == "Hello World"
+    assert parse_srt_realtime_text(srt) == "Hello\nWorld"
     assert parse_srt_realtime_text(srt, max_chars=5) == "World"

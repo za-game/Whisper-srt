@@ -39,8 +39,18 @@ def parse_srt_last_text(path: Path) -> str:
     return "\n".join(lines).strip()
 
 
-def parse_srt_realtime_text(path: Path, max_chars: int = 120) -> str:
-    """Join all subtitle texts and return the last ``max_chars`` characters."""
+def parse_srt_realtime_text(path: Path, max_chars: int = 1200) -> str:
+    """Join all subtitle texts and return the tail trimmed on line boundaries.
+
+    Parameters
+    ----------
+    path:
+        SRT file path.
+    max_chars:
+        Approximate character limit.  Older content beyond the limit is
+        discarded, but the cut occurs after the nearest newline so that the
+        display always starts on a whole line.  ``0`` disables the limit.
+    """
 
     try:
         txt = path.read_text(encoding="utf-8", errors="replace")
@@ -62,9 +72,14 @@ def parse_srt_realtime_text(path: Path, max_chars: int = 120) -> str:
         if tc_pat.match(line):
             continue
         lines.append(line)
-    joined = " ".join(lines).strip()
+    joined = "\n".join(lines).strip()
     if max_chars > 0 and len(joined) > max_chars:
-        return joined[-max_chars:]
+        cutoff = len(joined) - max_chars
+        nl = joined.find("\n", cutoff)
+        if nl != -1:
+            joined = joined[nl + 1 :]
+        else:
+            joined = joined[-max_chars:]
     return joined
 
 
