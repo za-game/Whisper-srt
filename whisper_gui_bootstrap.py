@@ -85,7 +85,6 @@ TORCH_PROBE_SERIES = ["", "~=2.8", "~=2.7", "~=2.6"]
 
 def _torch_version():
     try:
-        sys.modules.pop("torch", None)
         ver = metadata.version("torch")
         return version.parse(ver.split("+")[0])
     except Exception:
@@ -97,16 +96,52 @@ TRANSLATE_REPO_MAP = {
 
 # ──────────── 錄音設備偵測 ────────────
 def list_audio_devices():
-    devices = []
+    groups: dict[str, list[tuple[int, int]]] = {}
+    candidates = [
+        8000,
+        11025,
+        16000,
+        22050,
+        24000,
+        32000,
+        44100,
+        48000,
+        88200,
+        96000,
+        192000,
+    ]
     try:
         devs = sd.query_devices()
         for idx, dev in enumerate(devs):
-            if dev["max_input_channels"] > 0:  # 只列輸入設備
-                sr = int(dev["default_samplerate"])
-                devices.append((idx, f"{dev['name']} ({sr} Hz)", sr))
+            if dev["max_input_channels"] > 0 and dev["default_samplerate"] > 0:
+                name = dev["name"]
+                srs: set[int] = set()
+                for sr in candidates:
+                    try:
+                        sd.check_input_settings(device=idx, samplerate=sr)
+                    except Exception:
+                        continue
+                    else:
+                        srs.add(int(sr))
+                default_sr = int(dev["default_samplerate"])
+                if default_sr not in srs:
+                    try:
+                        sd.check_input_settings(device=idx, samplerate=default_sr)
+                    except Exception:
+                        pass
+                    else:
+                        srs.add(default_sr)
+                if not srs:
+                    continue
+                ordered = sorted(srs)
+                if default_sr in ordered:
+                    ordered.remove(default_sr)
+                    ordered.insert(0, default_sr)
+                for sr in ordered:
+                    groups.setdefault(name, []).append((idx, sr))
     except Exception as e:
-        devices.append((-1, f"偵測失敗: {e}", 16000))
-    return devices
+        return [(f"偵測失敗: {e}", [(-1, 16000)])]
+    return list(groups.items())
 
 
 def _calc_rms(audio) -> float:
@@ -379,6 +414,7 @@ def run_pip(args, log_fn=None, cancel_flag=None):
         text=True,
         bufsize=1,
     )
+    cancelled = False
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -386,12 +422,13 @@ def run_pip(args, log_fn=None, cancel_flag=None):
                 log_fn(line.rstrip())
             if cancel_flag and cancel_flag():
                 proc.terminate()
+                cancelled = True
                 break
         proc.wait()
     finally:
         if proc.stdout:
             proc.stdout.close()
-    if cancel_flag and cancel_flag():
+    if cancelled:
         raise RuntimeError("使用者取消")
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd)
@@ -607,19 +644,20 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # GPU 選擇
         self.gpu_combo = QtWidgets.QComboBox()
         self.gpu_list_ready.connect(self._apply_gpu_list)
-        QtCore.QTimer.singleShot(0, self.refresh_gpu_list)
         self.gpu_combo.setEnabled(self.device_combo.currentText().startswith("cuda"))
         form_layout.addRow("GPU", self.gpu_combo)
 
-        # 錄音設備選擇（展開前自動刷新）
+        # 錄音設備與取樣率選擇（按鈕觸發偵測）
         self.audio_device_combo = QtWidgets.QComboBox()
         self.audio_list_ready.connect(self._apply_audio_list)
-        QtCore.QTimer.singleShot(0, self.refresh_audio_devices)
-        form_layout.addRow("錄音設備", self.audio_device_combo)
-        def _showPopup():
-            self.refresh_audio_devices()
-            QtWidgets.QComboBox.showPopup(self.audio_device_combo)
-        self.audio_device_combo.showPopup = _showPopup
+        self.audio_sr_combo = QtWidgets.QComboBox()
+        self.audio_device_btn = QtWidgets.QPushButton("刷新")
+        self.audio_device_btn.clicked.connect(self.refresh_audio_devices)
+        audio_layout = QtWidgets.QHBoxLayout()
+        audio_layout.addWidget(self.audio_device_combo)
+        audio_layout.addWidget(self.audio_sr_combo)
+        audio_layout.addWidget(self.audio_device_btn)
+        form_layout.addRow("錄音設備", audio_layout)
 
         # VAD 控制
         self.vad_combo = QtWidgets.QComboBox()
@@ -646,7 +684,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
         form_layout.addRow("音量門檻", gate_widget)
         form_layout.labelForField(gate_widget).setToolTip(self.mic_slider.toolTip())
         self.mic_slider.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
-        self.mic_level_ready.connect(self.mic_level_bar.setValue)
+        self._mic_level_anim = QtCore.QPropertyAnimation(self.mic_level_bar, b"value", self)
+        self._mic_level_anim.setDuration(100)
+        self.mic_level_ready.connect(self._animate_mic_level)
 
         # 靜音門檻秒數（mWhisperSub: --silence，預設 0.3）
         self.silence_spin = QtWidgets.QDoubleSpinBox()
@@ -740,7 +780,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self._autosave_pending = False
         self._level_timer = QtCore.QTimer(self)
         self._level_timer.timeout.connect(self._poll_mic_level)
-        self._level_timer.start(200)
+        self._level_timer.start(100)
         self._level_thread = None
         # 設定變更 → 觸發自動儲存（debounce）
         self.settings.changed.connect(lambda: self.schedule_autosave(300))
@@ -753,14 +793,35 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.zh_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.device_combo.currentIndexChanged.connect(self.device_changed)
         self.gpu_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.audio_device_combo.currentIndexChanged.connect(self._update_sr_combo)
         self.audio_device_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.audio_device_combo.currentTextChanged.connect(
+            lambda text: self.audio_device_combo.setToolTip(text)
+        )
+        self.audio_sr_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.audio_sr_combo.currentTextChanged.connect(
+            lambda text: self.audio_sr_combo.setToolTip(text)
+        )
         self.vad_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.silence_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
         # 主視窗移動/縮放 → autosave main_window_geometry
         self.installEventFilter(self)
         # 啟動時嘗試還原上次專案（使用全域 QSettings）
         QtCore.QTimer.singleShot(0, self._auto_open_last_project)
+        self._initial_checks_done = False
+        self._pending_audio_dev: tuple[str | None, int | None] | None = None
+        self._pending_audio_sr: tuple[int | None, int | None] | None = None
         # —— 統一的本地模型資料夾：model_path/<Repo> —— #
+
+    def showEvent(self, ev: QtGui.QShowEvent) -> None:  # type: ignore[override]
+        super().showEvent(ev)
+        if not self._initial_checks_done:
+            QtCore.QTimer.singleShot(0, self._initial_checks)
+            self._initial_checks_done = True
+
+    def _initial_checks(self) -> None:
+        self.refresh_audio_devices()
+        self.check_env()
     def _repo_local_dir(self, repo_id: str) -> Path:
         return MODEL_PATH / repo_id.replace("/", "--")
 
@@ -1052,7 +1113,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         payload = {
             "app": "WhisperLiveCaption",
             "settings": {
-                "strategy": getattr(self.settings, "strategy", "overlay"),
+                "strategy": getattr(self.settings, "strategy", "smart"),
                 "cps": float(getattr(self.settings, "cps", 15)),
                 "fixed": float(getattr(self.settings, "fixed", 2)),
                 "preview": bool(getattr(self.settings, "preview", False)),
@@ -1077,6 +1138,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 "gpu_index": self.gpu_combo.currentIndex(),
                 "audio_device_text": self.audio_device_combo.currentText(),
                 "audio_device_index": self.audio_device_combo.currentIndex(),
+                "audio_sr_index": self.audio_sr_combo.currentIndex(),
+                "audio_sr_value": self.audio_sr_combo.currentData(),
                 "vad": self.vad_combo.currentText(),
                 "mic_gate": int(self.mic_slider.value()),
                 "silence": float(self.silence_spin.value()),
@@ -1155,14 +1218,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 except Exception: pass
             audio_text = gui.get("audio_device_text")
             audio_idx = gui.get("audio_device_index")
-            if audio_text:
-                i = self.audio_device_combo.findText(audio_text)
-                if i >= 0:
-                    self.audio_device_combo.setCurrentIndex(i)
-                elif isinstance(audio_idx, int) and 0 <= audio_idx < self.audio_device_combo.count():
-                    self.audio_device_combo.setCurrentIndex(audio_idx)
-            elif isinstance(audio_idx, int) and 0 <= audio_idx < self.audio_device_combo.count():
-                self.audio_device_combo.setCurrentIndex(audio_idx)
+            sr_idx = gui.get("audio_sr_index")
+            sr_val = gui.get("audio_sr_value")
+            self._pending_audio_dev = (audio_text, audio_idx)
+            self._pending_audio_sr = (sr_val, sr_idx)
             hot_proj_name = gui.get("hot_proj_name")
             if hot_proj_name:
                 self.hot_proj_name_edit.setText(hot_proj_name)
@@ -1202,6 +1261,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.status.appendPlainText(f"[Load] {p}")
         except Exception as e:
             self.status.appendPlainText(f"[Load] 失敗: {e}")
+        self.refresh_audio_devices()
         self._refresh_model_items()
 
     def schedule_autosave(self, delay_ms: int = 300):
@@ -1301,7 +1361,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
     def refresh_audio_devices(self):
         self.audio_device_combo.clear()
-        self.audio_device_combo.addItem("掃描中…", (-1, 16000))
+        self.audio_device_combo.addItem("掃描中…", [])
+        self.audio_sr_combo.clear()
+        self.audio_sr_combo.addItem("…", 16000)
 
         def worker():
             devices = list_audio_devices()
@@ -1310,17 +1372,55 @@ class BootstrapWin(QtWidgets.QMainWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     @QtCore.pyqtSlot(list)
-    def _apply_audio_list(self, items: list[tuple[int, str, int]]):
+    def _apply_audio_list(self, items: list[tuple[str, list[tuple[int, int]]]]):
         self.audio_device_combo.clear()
         if items:
-            for idx, label, sr in items:
-                self.audio_device_combo.addItem(label, (idx, sr))
+            for name, pairs in items:
+                self.audio_device_combo.addItem(name, pairs)
+                idx = self.audio_device_combo.count() - 1
+                self.audio_device_combo.setItemData(idx, name, QtCore.Qt.ToolTipRole)
         else:
-            self.audio_device_combo.addItem("偵測失敗", (-1, 16000))
+            self.audio_device_combo.addItem("偵測失敗", [(-1, 16000)])
+        if self._pending_audio_dev:
+            text, idx = self._pending_audio_dev
+            i = self.audio_device_combo.findText(text) if text else -1
+            if i >= 0:
+                self.audio_device_combo.setCurrentIndex(i)
+            elif isinstance(idx, int) and 0 <= idx < self.audio_device_combo.count():
+                self.audio_device_combo.setCurrentIndex(idx)
+            self._pending_audio_dev = None
+        self._update_sr_combo()
+        self.audio_device_combo.setToolTip(self.audio_device_combo.currentText())
+        if self._pending_audio_sr is not None:
+            val, idx = self._pending_audio_sr
+            j = self.audio_sr_combo.findData(val) if val is not None else -1
+            if j >= 0:
+                self.audio_sr_combo.setCurrentIndex(j)
+            elif isinstance(idx, int) and 0 <= idx < self.audio_sr_combo.count():
+                self.audio_sr_combo.setCurrentIndex(idx)
+            self._pending_audio_sr = None
+
+    def _update_sr_combo(self):
+        self.audio_sr_combo.clear()
+        data = self.audio_device_combo.currentData()
+        if not data:
+            return
+        srs: list[int] = []
+        for _, sr in data:
+            if sr not in srs:
+                srs.append(sr)
+        for sr in srs:
+            self.audio_sr_combo.addItem(f"{sr} Hz", sr)
+        default_sr = data[0][1]
+        j = self.audio_sr_combo.findData(default_sr)
+        if j >= 0:
+            self.audio_sr_combo.setCurrentIndex(j)
+        self.audio_sr_combo.setToolTip(self.audio_sr_combo.currentText())
 
     def detect_noise_level(self):
-        dev_data = self.audio_device_combo.currentData()
-        dev_id, sr = dev_data if dev_data is not None else (-1, 16000)
+        data = self.audio_device_combo.currentData() or [(-1, 16000)]
+        sr = self.audio_sr_combo.currentData() or 16000
+        dev_id = next((idx for idx, s in data if s == sr), data[0][0])
         duration = 15
         self._ui_log("偵測噪音等級中…")
         try:
@@ -1348,23 +1448,31 @@ class BootstrapWin(QtWidgets.QMainWindow):
             return
         if self._level_thread and self._level_thread.is_alive():
             return
-        dev_data = self.audio_device_combo.currentData()
-        dev_id, sr = dev_data if dev_data is not None else (-1, 16000)
+        data = self.audio_device_combo.currentData() or [(-1, 16000)]
+        sr = self.audio_sr_combo.currentData() or 16000
+        dev_id = next((idx for idx, s in data if s == sr), data[0][0])
 
         def worker() -> None:
             try:
                 audio = sd.rec(
-                    int(0.05 * sr), samplerate=sr, channels=1, dtype="float32", device=dev_id
+                    int(0.03 * sr), samplerate=sr, channels=1, dtype="float32", device=dev_id
                 )
                 sd.wait()
                 rms = _calc_rms(audio)
-                level = min(100, int(rms * 1000))
+                rms_db = 20 * np.log10(rms + 1e-6)
+                level = int(np.clip((rms_db + 60) * (100 / 60), 0, 100))
                 self.mic_level_ready.emit(level)
             except Exception:
                 pass
 
         self._level_thread = threading.Thread(target=worker, daemon=True)
         self._level_thread.start()
+
+    def _animate_mic_level(self, level: int) -> None:
+        self._mic_level_anim.stop()
+        self._mic_level_anim.setStartValue(self.mic_level_bar.value())
+        self._mic_level_anim.setEndValue(level)
+        self._mic_level_anim.start()
 
     def refresh_gpu_list(self):
         self.gpu_combo.clear()
@@ -1582,6 +1690,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
         def on_finished(data, err):
             result["data"] = data
             result["error"] = err
+            try:
+                dlg.canceled.disconnect(on_cancel)
+            except TypeError:  # pragma: no cover - disconnect if already removed
+                pass
             dlg.close()
 
         worker.finished.connect(on_finished)
@@ -1873,9 +1985,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
             args += ["--gpu", "-1"]
 
         # 錄音設備 ID 與採樣率
-        dev_data = self.audio_device_combo.currentData()
-        if dev_data is not None:
-            dev_id, sr = dev_data
+        data = self.audio_device_combo.currentData()
+        sr = self.audio_sr_combo.currentData()
+        if data and sr is not None:
+            dev_id = next((idx for idx, s in data if s == sr), data[0][0])
             args += ["--device", str(dev_id), "--sr", str(sr)]
         else:
             args += ["--sr", "auto"]
@@ -1883,7 +1996,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 傳遞 VAD 相關參數（永遠顯式傳遞，避免預設值不明）
         vad_opt = self.vad_combo.currentText()
         if vad_opt == "Auto":
-            args += ["--auto-vad", "--mic-thr", f"{self.mic_slider.value() / 100.0:.3f}"]
+            val = self.mic_slider.value()
+            thr = 0.0 if val == 0 else 10 ** ((val * 0.6 - 60) / 20)
+            args += ["--auto-vad", "--mic-thr", f"{thr:.6f}"]
         else:
             args += ["--vad_level", vad_opt]
         args += ["--silence", f"{self.silence_spin.value():.2f}"]
@@ -1923,6 +2038,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.overlay.show_entry_text("")
         if self.tray is None:
             self.tray = Tray(self.settings, self.overlay, parent=self, on_stop=self.stop_clicked)
+        self.hide()
         # 監看設定中的 srt_path → 更新最後一行到 overlay
         srt_path = self.settings.srt_path
         if self.srt_watcher is None:
