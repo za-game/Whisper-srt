@@ -58,7 +58,7 @@ class Settings(QtCore.QObject):
 
 
 class SubtitleOverlay(QtWidgets.QLabel):
-    MIN_W, MIN_H = 220, 90
+    BASE_MIN_W, BASE_MIN_H = 220, 90
 
     def __init__(self, settings: Settings):
         super().__init__("")
@@ -69,6 +69,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self._resize_origin = None
         self._resize_rect = None
         self.RESIZE_MARGIN = 12
+        self.MIN_W, self.MIN_H = self.BASE_MIN_W, self.BASE_MIN_H
         self.setWindowFlags(
             QtCore.Qt.WindowStaysOnTopHint
             | QtCore.Qt.FramelessWindowHint
@@ -81,7 +82,6 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self.setAlignment(
             QtCore.Qt.Alignment(self.settings.align) | QtCore.Qt.AlignVCenter
         )
-        self.setMinimumWidth(600)
         self.setWordWrap(False)
         self.setMinimumSize(self.MIN_W, self.MIN_H)
         self.setMargin(10)
@@ -92,6 +92,14 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self.display_timer.setSingleShot(True)
         self.display_timer.timeout.connect(self._clear_subtitle)
         self.resize(self.minimumWidth(), self.minimumHeight())
+
+    def _update_min_size(self):
+        fm = QtGui.QFontMetrics(self.font())
+        char_w = fm.horizontalAdvance("W" * 6)
+        line_h = fm.lineSpacing()
+        self.MIN_W = char_w + 20
+        self.MIN_H = line_h + 20
+        self.setMinimumSize(self.MIN_W, self.MIN_H)
 
     # --- Serialization of overlay geometry and text style ---
     def to_dict(self) -> dict:
@@ -204,10 +212,20 @@ class SubtitleOverlay(QtWidgets.QLabel):
     def _apply_settings(self):
         self.setFont(self.settings.font)
         self.color = self.settings.color
-        self.setAlignment(
-            QtCore.Qt.Alignment(self.settings.align) | QtCore.Qt.AlignVCenter
-        )
-        self.setWordWrap(self.settings.strategy == "realtime")
+        if self.settings.strategy == "realtime":
+            self.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
+            self.setWordWrap(True)
+            self._update_min_size()
+            self.resize(
+                max(self.width(), self.MIN_W), max(self.height(), self.MIN_H)
+            )
+        else:
+            self.setAlignment(
+                QtCore.Qt.Alignment(self.settings.align) | QtCore.Qt.AlignVCenter
+            )
+            self.setWordWrap(False)
+            self.MIN_W, self.MIN_H = 600, self.BASE_MIN_H
+            self.setMinimumSize(self.MIN_W, self.MIN_H)
         self.repaint()
 
     # 拖曳移動
@@ -372,14 +390,29 @@ class SubtitleOverlay(QtWidgets.QLabel):
         return int(min(max(ms, 1500), 6000))
 
     def _display_realtime(self):
-        fm = QtGui.QFontMetrics(self.font())
         margin = 2 * self.margin()
-        line_h = fm.lineSpacing()
+        avail_w = max(1, self.width() - margin)
         avail_h = max(1, self.height() - margin)
-        max_lines = max(1, avail_h // line_h)
-        lines = self._current_text.splitlines()
-        display_text = "\n".join(lines[-max_lines:])
-        self.setText(display_text)
+        layout = QtGui.QTextLayout(self._current_text, self.font())
+        layout.beginLayout()
+        lines = []
+        while True:
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(avail_w)
+            lines.append(line)
+        layout.endLayout()
+        visible = []
+        height = 0
+        for line in reversed(lines):
+            height += line.height()
+            if height > avail_h:
+                break
+            start = line.textStart()
+            length = line.textLength()
+            visible.insert(0, self._current_text[start : start + length])
+        self.setText("\n".join(visible))
         self.repaint()
 
     def resizeEvent(self, ev):
