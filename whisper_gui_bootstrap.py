@@ -743,7 +743,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self._level_timer.start(200)
         self._level_thread = None
         # 設定變更 → 觸發自動儲存（debounce）
-        self.settings.changed.connect(lambda: self.schedule_autosave(300))
+        self.settings.changed.connect(self._on_settings_changed)
         # GUI 欄位變更也要 autosave
         self.hotwords_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.srt_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
@@ -1194,8 +1194,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     try: self.srt_watcher.deleteLater()
                     except Exception: pass
                     self.srt_watcher = None
+                tail = 3 if self.settings.strategy == "realtime" else 1
                 self.srt_watcher = LiveSRTWatcher(
-                    self.settings.srt_path, self, initial_emit=True
+                    self.settings.srt_path, self, initial_emit=True, tail=tail
                 )
                 if self.overlay:
                     self.srt_watcher.updated.connect(self.overlay.show_entry_text)
@@ -1207,6 +1208,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
     def schedule_autosave(self, delay_ms: int = 300):
         self._autosave_pending = True
         self._autosave_timer.start(delay_ms)
+
+    def _on_settings_changed(self):
+        self.schedule_autosave(300)
+        if getattr(self, "srt_watcher", None):
+            self.srt_watcher.tail = 3 if self.settings.strategy == "realtime" else 1
 
     def _do_autosave(self):
         if not self._autosave_pending:
@@ -1254,8 +1260,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 try: self.srt_watcher.deleteLater()
                 except Exception: pass
                 self.srt_watcher = None
+            tail = 3 if self.settings.strategy == "realtime" else 1
             self.srt_watcher = LiveSRTWatcher(
-                self.settings.srt_path, self, initial_emit=True
+                self.settings.srt_path, self, initial_emit=True, tail=tail
             )
             if self.overlay:
                 self.srt_watcher.updated.connect(self.overlay.show_entry_text)
@@ -1464,8 +1471,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
             except Exception:
                 pass
             self.srt_watcher = None
+        tail = 3 if self.settings.strategy == "realtime" else 1
         self.srt_watcher = LiveSRTWatcher(
-            self.settings.srt_path, self, initial_emit=True
+            self.settings.srt_path, self, initial_emit=True, tail=tail
         )
         if self.overlay:
             self.srt_watcher.updated.connect(self.overlay.show_entry_text)
@@ -1863,6 +1871,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
         # 指定 SRT 輸出路徑（搭配 mWhisperSub 的 --srt_path）
         if self.settings.srt_path:
             args += ["--srt_path", str(self.settings.srt_path)]
+        if self.settings.strategy == "realtime":
+            args += ["--realtime"]
         # GPU 選擇
         if self.device_combo.currentText().startswith("cuda"):
             gpu_idx = self.gpu_combo.currentData()
@@ -1925,9 +1935,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.tray = Tray(self.settings, self.overlay, parent=self, on_stop=self.stop_clicked)
         # 監看設定中的 srt_path → 更新最後一行到 overlay
         srt_path = self.settings.srt_path
+        tail = 3 if self.settings.strategy == "realtime" else 1
         if self.srt_watcher is None:
             self.srt_watcher = LiveSRTWatcher(
-                srt_path, self, initial_emit=True
+                srt_path, self, initial_emit=True, tail=tail
             )
         else:
             # 若 path 變了，換一個新的 watcher（避免舊 watcher 卡在舊路徑）
@@ -1937,7 +1948,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 except Exception:
                     pass
                 self.srt_watcher = LiveSRTWatcher(
-                    srt_path, self, initial_emit=True
+                    srt_path, self, initial_emit=True, tail=tail
                 )
         # ── Fallback：當專案檔沒記錄 hotwords/srt 時，從專案資料夾補上；再不行就維持預設 ──
     def _fallback_fill_paths_from_dir(self, d: Path):
@@ -1969,8 +1980,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     try: self.srt_watcher.deleteLater()
                     except Exception: pass
                     self.srt_watcher = None
+                tail = 3 if self.settings.strategy == "realtime" else 1
                 self.srt_watcher = LiveSRTWatcher(
-                    self.settings.srt_path, self, initial_emit=True
+                    self.settings.srt_path, self, initial_emit=True, tail=tail
                 )
                 if self.overlay:
                     self.srt_watcher.updated.connect(self.overlay.show_entry_text)

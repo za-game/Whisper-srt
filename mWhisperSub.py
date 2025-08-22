@@ -159,11 +159,15 @@ parser.add_argument("--force_silence", action="store_true",help="忽略動態靜
 parser.add_argument("--write_strategy", default="truncate", choices=["truncate", "replace"])
 parser.add_argument("--fsync", action="store_true")
 parser.add_argument("--zh", default="s2twp", choices=["none", "t2tw", "s2t", "s2twp"])
+parser.add_argument("--realtime", action="store_true", help="realtime mode: overwrite last segment")
 
 # 3-6 SRT輸出
 parser.add_argument("--srt_path", default="live.srt",
                     help="輸出 SRT 檔案完整路徑，預設為 live.srt")
 args = parser.parse_args()
+REALTIME_MODE = args.realtime
+if REALTIME_MODE:
+    args.write_strategy = "replace"
 AUTO_VAD = args.auto_vad
 TEMPERATURES = [float(t) for t in args.temperature.split(",") if t.strip()]
 freq_words: set[str] = set()
