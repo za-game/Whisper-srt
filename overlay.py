@@ -1,4 +1,5 @@
 from pathlib import Path
+import math
 
 from PyQt5 import QtCore, QtWidgets, QtGui
 
@@ -100,11 +101,11 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self._scroll_anim.valueChanged.connect(self._on_scroll_anim)
 
     def _update_min_size(self):
-        fm = QtGui.QFontMetrics(self.font())
-        char_w = fm.horizontalAdvance("W" * 6)
-        line_h = fm.lineSpacing()
-        self.MIN_W = char_w + 20
-        self.MIN_H = line_h + 20
+        fm_f = QtGui.QFontMetricsF(self.font())
+        char_w = QtGui.QFontMetrics(self.font()).horizontalAdvance("W" * 6)
+        line_h = math.ceil(fm_f.height())
+        self.MIN_W = int(char_w + 20)
+        self.MIN_H = int(line_h + 20)
         self.setMinimumSize(self.MIN_W, self.MIN_H)
 
     # --- Serialization of overlay geometry and text style ---
@@ -458,22 +459,23 @@ class SubtitleOverlay(QtWidgets.QLabel):
         avail_h = max(1, self.height() - margin)
         layout = QtGui.QTextLayout(self._current_text, self.font())
         layout.beginLayout()
-        lines = []
+        # Collect line geometry ahead of time; QTextLine objects become
+        # invalid after endLayout(), which previously yielded empty or
+        # crashing renders when accessed later.
+        lines: list[tuple[int, int, float]] = []  # (start, length, height)
         while True:
             line = layout.createLine()
             if not line.isValid():
                 break
             line.setLineWidth(avail_w)
-            lines.append(line)
+            lines.append((line.textStart(), line.textLength(), line.height()))
         layout.endLayout()
         visible: list[str] = []
-        height = 0
-        for line in reversed(lines):
-            height += line.height()
+        height = 0.0
+        for start, length, lh in reversed(lines):
+            height += lh
             if height > avail_h:
                 break
-            start = line.textStart()
-            length = line.textLength()
             visible.insert(0, self._current_text[start : start + length])
         prev = self._visible_lines
         self._visible_lines = visible
