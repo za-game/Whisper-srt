@@ -784,6 +784,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self._level_thread = None
         # 設定變更 → 觸發自動儲存（debounce）
         self.settings.changed.connect(lambda: self.schedule_autosave(300))
+        self.settings.changed.connect(self._settings_changed)
         # GUI 欄位變更也要 autosave
         self.hotwords_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.srt_edit.textChanged.connect(lambda _=None: self.schedule_autosave(300))
@@ -1254,10 +1255,13 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     except Exception: pass
                     self.srt_watcher = None
                 self.srt_watcher = LiveSRTWatcher(
-                    self.settings.srt_path, self, initial_emit=True
+                    self.settings.srt_path,
+                    self,
+                    initial_emit=True,
+                    mode=self._watch_mode(),
                 )
                 if self.overlay:
-                    self.srt_watcher.updated.connect(self.overlay.show_entry_text)
+                    self.srt_watcher.updated.connect(self.overlay.set_subtitle_text)
             self.status.appendPlainText(f"[Load] {p}")
         except Exception as e:
             self.status.appendPlainText(f"[Load] 失敗: {e}")
@@ -1273,6 +1277,13 @@ class BootstrapWin(QtWidgets.QMainWindow):
             return
         self._autosave_pending = False
         self._write_project()
+
+    def _watch_mode(self) -> str:
+        return "realtime" if getattr(self.settings, "strategy", "") == "realtime" else "last"
+
+    def _settings_changed(self):
+        if self.srt_watcher:
+            self.srt_watcher.set_mode(self._watch_mode())
 
     def eventFilter(self, obj, ev):
         t = ev.type()
@@ -1315,10 +1326,13 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 except Exception: pass
                 self.srt_watcher = None
             self.srt_watcher = LiveSRTWatcher(
-                self.settings.srt_path, self, initial_emit=True
+                self.settings.srt_path,
+                self,
+                initial_emit=True,
+                mode=self._watch_mode(),
             )
             if self.overlay:
-                self.srt_watcher.updated.connect(self.overlay.show_entry_text)
+                self.srt_watcher.updated.connect(self.overlay.set_subtitle_text)
             self._ui_log(f"已選擇 SRT：{path}")
 
     def edit_srt_file(self):
@@ -1573,10 +1587,13 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 pass
             self.srt_watcher = None
         self.srt_watcher = LiveSRTWatcher(
-            self.settings.srt_path, self, initial_emit=True
+            self.settings.srt_path,
+            self,
+            initial_emit=True,
+            mode=self._watch_mode(),
         )
         if self.overlay:
-            self.srt_watcher.updated.connect(self.overlay.show_entry_text)
+            self.srt_watcher.updated.connect(self.overlay.set_subtitle_text)
         # 聚焦：把新檔打開編輯（可選）
         # os.startfile(str(hot_path))  # 若你想自動打開
         self._load_project()
@@ -2009,7 +2026,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             args += ["--temperature", temp_str]
         # 啟動 mWhisperSub（在 Windows 上讓它進入新的 process group，之後可用 CTRL_BREAK_EVENT 做優雅關閉）
         env = os.environ.copy()
-        popen_kwargs = {"cwd": ROOT_DIR, "env": env}
+        popen_kwargs = {"cwd": str(ROOT_DIR), "env": env}
         if os.name == "nt":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
             if self.console_chk.isChecked():
@@ -2019,6 +2036,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 # 隱藏主控台
                 creationflags |= subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
             popen_kwargs["creationflags"] = creationflags
+        if not self.console_chk.isChecked():
+            popen_kwargs.update(
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         # 非 Windows：不特別處理 console 視窗（由桌面環境決定），但仍會把 --log 傳給子程式（若有勾選）
         self.proc = subprocess.Popen([sys.executable, str(ENGINE_PY)] + args, **popen_kwargs)
         self.start_btn.setEnabled(False)
@@ -2037,13 +2060,23 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.overlay.show()  # 出現到桌面
         self.overlay.show_entry_text("")
         if self.tray is None:
-            self.tray = Tray(self.settings, self.overlay, parent=self, on_stop=self.stop_clicked)
+            self.tray = Tray(
+                self.settings,
+                self.overlay,
+                parent=self,
+                on_start=self.start_clicked,
+                on_stop=self.stop_clicked,
+            )
+        self.tray.set_running(True)
         self.hide()
         # 監看設定中的 srt_path → 更新最後一行到 overlay
         srt_path = self.settings.srt_path
         if self.srt_watcher is None:
             self.srt_watcher = LiveSRTWatcher(
-                srt_path, self, initial_emit=True
+                srt_path,
+                self,
+                initial_emit=True,
+                mode=self._watch_mode(),
             )
         else:
             # 若 path 變了，換一個新的 watcher（避免舊 watcher 卡在舊路徑）
@@ -2053,7 +2086,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 except Exception:
                     pass
                 self.srt_watcher = LiveSRTWatcher(
-                    srt_path, self, initial_emit=True
+                    srt_path,
+                    self,
+                    initial_emit=True,
+                    mode=self._watch_mode(),
                 )
         # ── Fallback：當專案檔沒記錄 hotwords/srt 時，從專案資料夾補上；再不行就維持預設 ──
     def _fallback_fill_paths_from_dir(self, d: Path):
@@ -2085,11 +2121,14 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     try: self.srt_watcher.deleteLater()
                     except Exception: pass
                     self.srt_watcher = None
-                self.srt_watcher = LiveSRTWatcher(
-                    self.settings.srt_path, self, initial_emit=True
-                )
-                if self.overlay:
-                    self.srt_watcher.updated.connect(self.overlay.show_entry_text)
+            self.srt_watcher = LiveSRTWatcher(
+                self.settings.srt_path,
+                self,
+                initial_emit=True,
+                mode=self._watch_mode(),
+            )
+            if self.overlay:
+                self.srt_watcher.updated.connect(self.overlay.show_entry_text)
                 self._ui_log(f"專案 SRT：{srt}")
         # 關鍵：不管 watcher 何時建立，都要**確保**把 updated 接到 overlay
         if self.srt_watcher and self.overlay:
@@ -2140,9 +2179,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.proc = None
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        # 清一下 overlay 畫面（保留視窗，避免第二次設定要再叫出）
+        # 清一下 overlay 畫面（保留視窗）
         if self.overlay:
-            self.overlay.show_entry_text("")
+            self.overlay.set_subtitle_text("")
+        if getattr(self, "tray", None):
+            self.tray.set_running(False)
 
     def exit_clicked(self):
         if self.proc:

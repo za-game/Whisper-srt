@@ -2,7 +2,7 @@ from pathlib import Path
 import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
-from srt_utils import parse_srt_last_text
+from srt_utils import parse_srt_last_text, parse_srt_realtime_text, drop_covered_blocks
 
 
 def test_parse_srt_last_text_basic(tmp_path):
@@ -28,3 +28,101 @@ def test_parse_srt_last_text_bom_and_blank(tmp_path):
     empty = tmp_path / "empty.srt"
     empty.write_text("\n", encoding="utf-8")
     assert parse_srt_last_text(empty) == ""
+
+
+def test_parse_srt_realtime_text(tmp_path):
+    content = (
+        "1\n00:00:00,000 --> 00:00:01,000\nHello\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\nWorld\n"
+    )
+    srt = tmp_path / "c.srt"
+    srt.write_text(content, encoding="utf-8")
+    assert parse_srt_realtime_text(srt) == "Hello World"
+    assert parse_srt_realtime_text(srt, max_chars=5) == "World"
+
+
+def test_parse_srt_realtime_text_dedup(tmp_path):
+    content = (
+        "1\n00:00:00,000 --> 00:00:01,000\nHello\n\n"
+        "1\n00:00:00,000 --> 00:00:01,000\nHello\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\nWorld\n"
+    )
+    srt = tmp_path / "d.srt"
+    srt.write_text(content, encoding="utf-8")
+    assert parse_srt_realtime_text(srt) == "Hello World"
+
+
+def test_parse_srt_realtime_text_overwrite(tmp_path):
+    content = (
+        "1\n00:00:00,000 --> 00:00:01,000\nHello wor\n\n"
+        "1\n00:00:00,000 --> 00:00:01,000\nHello world\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\nBye\n"
+    )
+    srt = tmp_path / "e.srt"
+    srt.write_text(content, encoding="utf-8")
+    assert parse_srt_realtime_text(srt) == "Hello world Bye"
+
+
+def test_parse_srt_realtime_text_overwrite_nonconsecutive(tmp_path):
+    content = (
+        "1\n00:00:00,000 --> 00:00:01,000\nHello\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\nWorld\n\n"
+        "1\n00:00:00,000 --> 00:00:01,000\nHello there\n"
+    )
+    srt = tmp_path / "f.srt"
+    srt.write_text(content, encoding="utf-8")
+    assert parse_srt_realtime_text(srt) == "Hello there World"
+
+
+def test_parse_srt_realtime_text_overlap_merge(tmp_path):
+    content = (
+        "1\n00:00:00,000 --> 00:00:02,000\nThis is a test\n\n"
+        "2\n00:00:01,500 --> 00:00:03,000\nis a test of the system\n"
+    )
+    srt = tmp_path / "g.srt"
+    srt.write_text(content, encoding="utf-8")
+    assert parse_srt_realtime_text(srt) == "This is a test of the system"
+
+
+def test_parse_srt_realtime_text_overlap_merge_cjk(tmp_path):
+    content = (
+        "1\n00:00:00,000 --> 00:00:02,000\n檢警還發現其中一名共犯\n\n"
+        "2\n00:00:01,500 --> 00:00:03,000\n發現其中一名共犯\n"
+    )
+    srt = tmp_path / "h.srt"
+    srt.write_text(content, encoding="utf-8")
+    assert parse_srt_realtime_text(srt) == "檢警還發現其中一名共犯"
+
+
+def test_parse_srt_realtime_text_prefix_candidate(tmp_path):
+    content = (
+        "1\n00:00:00,000 --> 00:00:02,000\n這一塊其實是你全身最硬的組織\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\n這一塊其實是你全身\n"
+    )
+    srt = tmp_path / "i.srt"
+    srt.write_text(content, encoding="utf-8")
+    assert parse_srt_realtime_text(srt) == "這一塊其實是你全身最硬的組織"
+
+
+def test_drop_covered_blocks_merge(tmp_path):
+    live = [
+        {"start": 0.0, "end": 2.0, "text": "在查 我們在"},
+        {"start": 2.5, "end": 3.0, "text": "要求說"},
+    ]
+    final = {"start": 0.0, "end": 3.0, "text": "我們在查 我們在要求說"}
+    live = drop_covered_blocks(live, final)
+    live.append(final)
+    srt_path = tmp_path / "merge.srt"
+    def fmt(t):
+        h = int(t // 3600)
+        m = int((t % 3600) // 60)
+        s = int(t % 60)
+        ms = int(round((t - int(t)) * 1000))
+        return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+    content = "".join(
+        f"{i}\n{fmt(r['start'])} --> {fmt(r['end'])}\n{r['text']}\n\n"
+        for i, r in enumerate(live, 1)
+    )
+    srt_path.write_text(content, encoding="utf-8")
+    assert parse_srt_realtime_text(srt_path) == "我們在查 我們在要求說"
