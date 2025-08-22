@@ -365,7 +365,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
             text_rect = p.boundingRect(rect, QtCore.Qt.TextWordWrap, text)
             draw_rect = QtCore.QRect(rect)
             draw_rect.setTop(rect.bottom() - text_rect.height())
-            draw_rect.translate(0, self._anim_offset)
+            draw_rect.translate(0, int(round(self._anim_offset)))
 
         if self.settings.shadow_enabled and text:
             base = QtGui.QColor(self.settings.shadow_color)
