@@ -12,7 +12,7 @@ class Settings(QtCore.QObject):
 
     def __init__(self):
         super().__init__()
-        self.strategy = self._qs.value("strategy", "overlay")  # "cps" | "fixed" | "overlay"
+        self.strategy = self._qs.value("strategy", "overlay")  # "cps" | "fixed" | "overlay" | "realtime"
         self.cps = float(self._qs.value("cps", 15))
         self.fixed = float(self._qs.value("fixed", 2))
         self.font = self._qs.value("font", QtGui.QFont("Arial", 32), type=QtGui.QFont)
@@ -356,8 +356,12 @@ class SubtitleOverlay(QtWidgets.QLabel):
             )
             self.repaint()
             return
-        if text == self._current_text:
-            return
+        if self.settings.strategy == "realtime":
+            if text == self._current_text:
+                return
+        else:
+            if text == self._current_text:
+                return
         self._current_text = text
         if not text.strip():
             self.setText("")
@@ -366,8 +370,9 @@ class SubtitleOverlay(QtWidgets.QLabel):
             return
         self.setText(text)
         fm = QtGui.QFontMetrics(self.font())
-        text_w = fm.horizontalAdvance(text)
-        text_h = fm.height()
+        lines = text.splitlines() or [text]
+        text_w = max(fm.horizontalAdvance(l) for l in lines)
+        text_h = fm.height() * len(lines)
         margin = 2 * self.margin()
         PADDING = 40
         new_w = max(text_w + margin + PADDING, 600)
@@ -386,7 +391,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
         if self.settings.preview:
             self.show_entry_text(self.settings.preview_text)
             return
-        if "overlay" != self.settings.strategy:
+        if self.settings.strategy not in ("overlay", "realtime"):
             self._current_text = ""
             self.setText("")
             self._resize_keep_anchor(self.minimumWidth(), self.minimumHeight())
@@ -648,6 +653,7 @@ class Tray(QtWidgets.QSystemTrayIcon):
         for name, label in (
             ("cps", "cps（單行字元×秒數）"),
             ("fixed", "fixed（每行固定秒數）"),
+            ("realtime", "realtime（最後多行即時）"),
             ("overlay", "overlay（直到下行）"),
             ("none", "不顯示字幕（OBS 模式）"),
         ):

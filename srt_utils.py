@@ -10,8 +10,16 @@ def _tc_to_sec(tc: str) -> float:
     return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
 
 
-def parse_srt_last_text(path: Path) -> str:
-    """以正則解析最後一段字幕的文字，避免 BOM/空白/非典型格式導致時間碼殘留。"""
+def parse_srt_last_text(path: Path, tail: int = 1) -> str:
+    """以正則解析最後幾段字幕的文字，避免 BOM/空白/非典型格式導致時間碼殘留。
+
+    Parameters
+    ----------
+    path: Path
+        SRT 檔路徑。
+    tail: int, default=1
+        要串接的最後字幕段數。
+    """
 
     try:
         txt = path.read_text(encoding="utf-8", errors="replace")
@@ -23,28 +31,33 @@ def parse_srt_last_text(path: Path) -> str:
     blocks = re.split(r"\n\s*\n", txt.strip())
     if not blocks:
         return ""
-    last = blocks[-1]
+    blocks = blocks[-max(1, tail) :]
     tc_pat = re.compile(
         r"^\s*(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3}).*$"
     )
-    lines = [l.rstrip("\r") for l in last.splitlines() if l.strip()]
-    if not lines:
-        return ""
-    if lines and lines[0].lstrip().isdigit():
-        lines = lines[1:]
-    if not lines:
-        return ""
-    if tc_pat.match(lines[0]):
-        lines = lines[1:]
-    return "\n".join(lines).strip()
+    texts: list[str] = []
+    for blk in blocks:
+        lines = [l.rstrip("\r") for l in blk.splitlines() if l.strip()]
+        if not lines:
+            continue
+        if lines and lines[0].lstrip().isdigit():
+            lines = lines[1:]
+        if not lines:
+            continue
+        if tc_pat.match(lines[0]):
+            lines = lines[1:]
+        if lines:
+            texts.append("\n".join(lines).strip())
+    return "\n".join(texts).strip()
 
 
 class LiveSRTWatcher(QtCore.QObject):
     updated = QtCore.pyqtSignal(str)  # text
 
-    def __init__(self, srt_path: Path, parent=None, initial_emit: bool = False):
+    def __init__(self, srt_path: Path, parent=None, initial_emit: bool = False, tail: int = 1):
         super().__init__(parent)
         self.srt_path = Path(srt_path).resolve()
+        self.tail = max(1, int(tail))
         if not self.srt_path.exists():
             try:
                 self.srt_path.touch(exist_ok=True)
@@ -69,7 +82,7 @@ class LiveSRTWatcher(QtCore.QObject):
         self._last_text = ""
 
     def _emit_latest(self):
-        text = parse_srt_last_text(self.srt_path)
+        text = parse_srt_last_text(self.srt_path, self.tail)
         if text == self._last_text:
             return
         self._last_text = text
