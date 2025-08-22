@@ -646,7 +646,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
         form_layout.addRow("音量門檻", gate_widget)
         form_layout.labelForField(gate_widget).setToolTip(self.mic_slider.toolTip())
         self.mic_slider.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
-        self.mic_level_ready.connect(self.mic_level_bar.setValue)
+        self._mic_level_anim = QtCore.QPropertyAnimation(self.mic_level_bar, b"value", self)
+        self._mic_level_anim.setDuration(100)
+        self.mic_level_ready.connect(self._animate_mic_level)
 
         # 靜音門檻秒數（mWhisperSub: --silence，預設 0.3）
         self.silence_spin = QtWidgets.QDoubleSpinBox()
@@ -740,7 +742,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self._autosave_pending = False
         self._level_timer = QtCore.QTimer(self)
         self._level_timer.timeout.connect(self._poll_mic_level)
-        self._level_timer.start(200)
+        self._level_timer.start(100)
         self._level_thread = None
         # 設定變更 → 觸發自動儲存（debounce）
         self.settings.changed.connect(lambda: self.schedule_autosave(300))
@@ -1365,7 +1367,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
         def worker() -> None:
             try:
                 audio = sd.rec(
-                    int(0.05 * sr), samplerate=sr, channels=1, dtype="float32", device=dev_id
+                    int(0.03 * sr), samplerate=sr, channels=1, dtype="float32", device=dev_id
                 )
                 sd.wait()
                 rms = _calc_rms(audio)
@@ -1377,6 +1379,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         self._level_thread = threading.Thread(target=worker, daemon=True)
         self._level_thread.start()
+
+    def _animate_mic_level(self, level: int) -> None:
+        self._mic_level_anim.stop()
+        self._mic_level_anim.setStartValue(self.mic_level_bar.value())
+        self._mic_level_anim.setEndValue(level)
+        self._mic_level_anim.start()
 
     def refresh_gpu_list(self):
         self.gpu_combo.clear()
