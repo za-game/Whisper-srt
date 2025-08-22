@@ -1593,6 +1593,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
         def on_finished(data, err):
             result["data"] = data
             result["error"] = err
+            try:
+                dlg.canceled.disconnect(on_cancel)
+            except TypeError:  # pragma: no cover - disconnect if already removed
+                pass
             dlg.close()
 
         worker.finished.connect(on_finished)
