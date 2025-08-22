@@ -29,6 +29,7 @@ import threading
 import time
 import subprocess
 import sys
+import math
 from collections import deque
 from datetime import timedelta
 from pathlib import Path
@@ -869,25 +870,49 @@ def writer():
     while True:
         rec = write_q.get(); now = rec["start"]
 
-        # 1) similarity dedup
-        if any(_similar(rec["text"], s["text"]) >= SIM_THR and abs(rec["start"] - s["start"]) < DEDUP_WIN for s in sliding):
-            write_q.task_done(); continue
-
-        # 2) merge MAXHOP back-to-back
+        # 1) replace or skip exact duplicates
         if live:
             last = live[-1]
-            if (rec["reason"] == "MAXHOP" and last["reason"] == "VAD" and
-                0 < rec["start"] - last["start"] < MERGE_WIN and rec["text"].startswith(last["text"])):
+            if (
+                math.isclose(rec["start"], last["start"], abs_tol=1e-3)
+                and math.isclose(rec["end"], last["end"], abs_tol=1e-3)
+            ):
+                if rec["text"] == last["text"]:
+                    write_q.task_done(); continue
+                live[-1] = rec
+                sliding[-1] = rec
+                flush(live); last_flush = time.monotonic()
+                write_q.task_done(); continue
+            if rec["text"] == last["text"]:
+                write_q.task_done(); continue
+
+        # 2) similarity dedup
+        if any(
+            _similar(rec["text"], s["text"]) >= SIM_THR
+            and abs(rec["start"] - s["start"]) < DEDUP_WIN
+            for s in sliding
+        ):
+            write_q.task_done(); continue
+
+        # 3) merge MAXHOP back-to-back
+        if live:
+            last = live[-1]
+            if (
+                rec["reason"] == "MAXHOP"
+                and last["reason"] == "VAD"
+                and 0 < rec["start"] - last["start"] < MERGE_WIN
+                and rec["text"].startswith(last["text"])
+            ):
                 last.update(text=rec["text"], end=rec["end"], reason="MERGE")
                 sliding.append(last)
                 flush(live); last_flush = time.monotonic()
                 write_q.task_done(); continue
 
-        # 3) append & maintain sliding window
+        # 4) append & maintain sliding window
         live.append(rec); sliding.append(rec)
         sliding = [s for s in sliding if now - s["start"] < DEDUP_WIN]
 
-        # 4) flush conditions
+        # 5) flush conditions
         if any(rec["text"].endswith(p) for p in "。！？…") or rec["reason"] == "MERGE":
             flush(live); last_flush = time.monotonic()
         elif time.monotonic() - last_flush >= FLUSH_EVERY:

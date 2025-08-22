@@ -2026,7 +2026,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             args += ["--temperature", temp_str]
         # 啟動 mWhisperSub（在 Windows 上讓它進入新的 process group，之後可用 CTRL_BREAK_EVENT 做優雅關閉）
         env = os.environ.copy()
-        popen_kwargs = {"cwd": ROOT_DIR, "env": env}
+        popen_kwargs = {"cwd": str(ROOT_DIR), "env": env}
         if os.name == "nt":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
             if self.console_chk.isChecked():

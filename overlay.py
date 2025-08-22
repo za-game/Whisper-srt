@@ -93,6 +93,11 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self.display_timer.setSingleShot(True)
         self.display_timer.timeout.connect(self._clear_subtitle)
         self.resize(self.minimumWidth(), self.minimumHeight())
+        self._visible_lines: list[str] = []
+        self._anim_offset = 0.0
+        self._scroll_anim = QtCore.QVariantAnimation(self)
+        self._scroll_anim.setDuration(150)
+        self._scroll_anim.valueChanged.connect(self._on_scroll_anim)
 
     def _update_min_size(self):
         fm = QtGui.QFontMetrics(self.font())
@@ -359,6 +364,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
             text_rect = p.boundingRect(rect, QtCore.Qt.TextWordWrap, text)
             draw_rect = QtCore.QRect(rect)
             draw_rect.setTop(rect.bottom() - text_rect.height())
+            draw_rect.translate(0, self._anim_offset)
 
         if self.settings.shadow_enabled and text:
             base = QtGui.QColor(self.settings.shadow_color)
@@ -442,6 +448,10 @@ class SubtitleOverlay(QtWidgets.QLabel):
         ms = base + bonus
         return int(min(max(ms, 1500), 6000))
 
+    def _on_scroll_anim(self, value: float):
+        self._anim_offset = float(value)
+        self.repaint()
+
     def _display_realtime(self):
         margin = 2 * self.margin()
         avail_w = max(1, self.width() - margin)
@@ -456,7 +466,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
             line.setLineWidth(avail_w)
             lines.append(line)
         layout.endLayout()
-        visible = []
+        visible: list[str] = []
         height = 0
         for line in reversed(lines):
             height += line.height()
@@ -465,8 +475,20 @@ class SubtitleOverlay(QtWidgets.QLabel):
             start = line.textStart()
             length = line.textLength()
             visible.insert(0, self._current_text[start : start + length])
+        prev = self._visible_lines
+        self._visible_lines = visible
+        added = max(0, len(visible) - len(prev))
         self.setText("\n".join(visible))
-        self.repaint()
+        if added > 0:
+            fm = QtGui.QFontMetrics(self.font())
+            dy = fm.lineSpacing() * added
+            self._scroll_anim.stop()
+            self._scroll_anim.setStartValue(dy)
+            self._scroll_anim.setEndValue(0)
+            self._scroll_anim.start()
+        else:
+            self._anim_offset = 0.0
+            self.repaint()
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
@@ -488,6 +510,8 @@ class SubtitleOverlay(QtWidgets.QLabel):
             text = text.replace("\n", " ")
             if not text.strip():
                 self._current_text = ""
+                self._visible_lines = []
+                self._anim_offset = 0.0
                 self.setText("")
                 self.repaint()
                 self.display_timer.stop()
