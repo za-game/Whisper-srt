@@ -68,10 +68,8 @@ def parse_srt_realtime_text(path: Path, max_chars: int = 1200) -> str:
         r"^\s*(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3}).*$"
     )
     blocks = re.split(r"\n\s*\n", txt.strip())
-    lines: list[str] = []
+    entries: list[tuple[str | None, str | None, str]] = []  # (idx, tc, text)
     last_text = ""
-    last_idx = None
-    last_tc = None
     for blk in blocks:
         raw_lines = [l.rstrip("\r") for l in blk.splitlines() if l.strip()]
         if not raw_lines:
@@ -79,30 +77,26 @@ def parse_srt_realtime_text(path: Path, max_chars: int = 1200) -> str:
         idx = None
         tc = None
         i = 0
-        if raw_lines and raw_lines[0].lstrip().isdigit():
+        if raw_lines[0].lstrip().isdigit():
             idx = raw_lines[0].strip()
             i += 1
         if i < len(raw_lines) and tc_pat.match(raw_lines[i]):
             tc = raw_lines[i].strip()
             i += 1
         text = "\n".join(raw_lines[i:]).strip()
-        if not text:
+        if not text or text == last_text:
             continue
-        if text == last_text:
-            continue
-        if idx == last_idx and tc == last_tc:
-            if lines:
-                lines[-1] = text
-            else:
-                lines.append(text)
-            last_text = text
-            continue
-        lines.append(text)
+        replaced = False
+        for n, (p_idx, p_tc, _) in enumerate(entries):
+            if idx == p_idx and tc == p_tc:
+                entries[n] = (idx, tc, text)
+                replaced = True
+                break
+        if not replaced:
+            entries.append((idx, tc, text))
         last_text = text
-        last_idx = idx
-        last_tc = tc
 
-    joined = "\n".join(lines).strip()
+    joined = "\n".join(t for _, _, t in entries).strip()
     if max_chars > 0 and len(joined) > max_chars:
         cutoff = len(joined) - max_chars
         nl = joined.find("\n", cutoff)
