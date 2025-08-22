@@ -94,7 +94,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self.display_timer.setSingleShot(True)
         self.display_timer.timeout.connect(self._clear_subtitle)
         self.resize(self.minimumWidth(), self.minimumHeight())
-        self._visible_lines: list[str] = []
+        self._last_lines: list[str] = []
         self._anim_offset = 0.0
         self._scroll_anim = QtCore.QVariantAnimation(self)
         self._scroll_anim.setDuration(150)
@@ -477,17 +477,16 @@ class SubtitleOverlay(QtWidgets.QLabel):
             if height > avail_h:
                 break
             visible.insert(0, self._current_text[start : start + length])
-        prev = self._visible_lines
-        self._visible_lines = visible
-        added = max(0, len(visible) - len(prev))
-        if added == 0 and len(visible) == len(prev):
-            for i in range(1, len(prev) + 1):
-                if visible[:-i] == prev[i:]:
-                    added = i
-                    break
-        self.setText("\n".join(visible))
-        if added > 0:
+        new_lines = visible
+        prev = self._last_lines
+        animate = (
+            len(new_lines) > len(prev)
+            or (new_lines and prev and new_lines[-1] != prev[-1])
+        )
+        self.setText("\n".join(new_lines))
+        if animate:
             fm = QtGui.QFontMetrics(self.font())
+            added = max(1, len(new_lines) - len(prev))
             dy = fm.lineSpacing() * added
             self._scroll_anim.stop()
             self._scroll_anim.setStartValue(dy)
@@ -496,6 +495,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
         else:
             self._anim_offset = 0.0
             self.repaint()
+        self._last_lines = new_lines
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
@@ -517,7 +517,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
             text = text.replace("\n", " ")
             if not text.strip():
                 self._current_text = ""
-                self._visible_lines = []
+                self._last_lines = []
                 self._anim_offset = 0.0
                 self.setText("")
                 self.repaint()
