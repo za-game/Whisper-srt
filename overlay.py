@@ -66,6 +66,9 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self._drag_pos = None
         self.border_visible = False
         self._current_text = ""
+        self._resize_origin = None
+        self._resize_rect = None
+        self.RESIZE_MARGIN = 12
         self.setWindowFlags(
             QtCore.Qt.WindowStaysOnTopHint
             | QtCore.Qt.FramelessWindowHint
@@ -204,25 +207,58 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self.setAlignment(
             QtCore.Qt.Alignment(self.settings.align) | QtCore.Qt.AlignVCenter
         )
+        self.setWordWrap(self.settings.strategy == "realtime")
         self.repaint()
 
     # 拖曳移動
     def mousePressEvent(self, ev: QtGui.QMouseEvent):
         if ev.button() == QtCore.Qt.LeftButton:
-            self._drag_pos = ev.globalPos() - self.frameGeometry().topLeft()
-            self.setCursor(QtCore.Qt.SizeAllCursor)
-            ev.accept()
+            if (
+                self.settings.strategy == "realtime"
+                and self._in_resize_zone(ev.pos())
+            ):
+                self._resize_origin = ev.globalPos()
+                self._resize_rect = self.geometry()
+                self.setCursor(QtCore.Qt.SizeFDiagCursor)
+                ev.accept()
+            else:
+                self._drag_pos = ev.globalPos() - self.frameGeometry().topLeft()
+                self.setCursor(QtCore.Qt.SizeAllCursor)
+                ev.accept()
 
     def mouseMoveEvent(self, ev: QtGui.QMouseEvent):
+        if (
+            ev.buttons() & QtCore.Qt.LeftButton
+            and self._resize_origin is not None
+            and self._resize_rect is not None
+        ):
+            delta = ev.globalPos() - self._resize_origin
+            new_w = max(self.MIN_W, self._resize_rect.width() + delta.x())
+            new_h = max(self.MIN_H, self._resize_rect.height() + delta.y())
+            self.resize(new_w, new_h)
+            ev.accept()
+            return
         if ev.buttons() & QtCore.Qt.LeftButton and self._drag_pos is not None:
             self.move(ev.globalPos() - self._drag_pos)
             ev.accept()
+            return
+        if self.settings.strategy == "realtime" and self._in_resize_zone(ev.pos()):
+            self.setCursor(QtCore.Qt.SizeFDiagCursor)
+        else:
+            self.setCursor(QtCore.Qt.ArrowCursor)
 
     def mouseReleaseEvent(self, ev: QtGui.QMouseEvent):
         if ev.button() == QtCore.Qt.LeftButton:
-            self._drag_pos = None
-            self.setCursor(QtCore.Qt.ArrowCursor)
-            ev.accept()
+            if self._resize_origin is not None:
+                self._resize_origin = None
+                self._resize_rect = None
+                self.setCursor(QtCore.Qt.ArrowCursor)
+                ev.accept()
+                return
+            if self._drag_pos is not None:
+                self._drag_pos = None
+                self.setCursor(QtCore.Qt.ArrowCursor)
+                ev.accept()
 
     def enterEvent(self, _):
         self.border_visible = True
@@ -232,6 +268,12 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self.border_visible = False
         self.update()
 
+    def _in_resize_zone(self, pos: QtCore.QPoint) -> bool:
+        return (
+            self.width() - pos.x() <= self.RESIZE_MARGIN
+            and self.height() - pos.y() <= self.RESIZE_MARGIN
+        )
+
     def paintEvent(self, _ev):
         p = QtGui.QPainter(self)
         p.setRenderHints(
@@ -239,30 +281,14 @@ class SubtitleOverlay(QtWidgets.QLabel):
         )
         p.fillRect(self.rect(), QtGui.QColor(0, 0, 0, 1))
         rect = self.rect().adjusted(5, 5, -5, -5)
-        text = self.text()
-        align = self.alignment()
-
-        # 重新計算對齊，即使文字超出也要保持正確位置
-        fm = QtGui.QFontMetrics(self.font())
-        text_w = fm.horizontalAdvance(text)
-        text_h = fm.height()
-        x = rect.left()
-        y = rect.top()
-        # 根據設定的對齊方式計算文字左上角
-        if align & QtCore.Qt.AlignHCenter:
-            x = rect.left() + (rect.width() - text_w) / 2
-        elif align & QtCore.Qt.AlignRight:
-            x = rect.right() - text_w
-        if align & QtCore.Qt.AlignVCenter:
-            y = rect.top() + (rect.height() - text_h) / 2
-        elif align & QtCore.Qt.AlignBottom:
-            y = rect.bottom() - text_h
-        text_rect = QtCore.QRect(int(x), int(y), int(text_w), int(text_h))
         offx = getattr(self.settings, "offset_x", 0)
         offy = getattr(self.settings, "offset_y", 0)
-        text_rect.translate(offx, offy)
+        rect = rect.translated(offx, offy)
+        text = self.text()
+        flags = int(self.alignment())
+        if self.settings.strategy == "realtime":
+            flags |= QtCore.Qt.TextWordWrap
 
-        # 陰影（距離 + 模糊取樣）
         if self.settings.shadow_enabled and text:
             base = QtGui.QColor(self.settings.shadow_color)
             a = max(0.0, min(1.0, float(self.settings.shadow_alpha)))
@@ -278,15 +304,10 @@ class SubtitleOverlay(QtWidgets.QLabel):
                 (-1, 1),
                 (-1, -1),
             ]
-            # 中心陰影
             sc = QtGui.QColor(base)
             sc.setAlphaF(a)
             p.setPen(sc)
-            p.drawText(
-                text_rect.translated(dist, dist),
-                int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
-                text,
-            )
+            p.drawText(rect.translated(dist, dist), flags, text)
             for r in range(1, blur + 1):
                 fall = a * (1 - r / (blur + 1)) ** 2
                 sc = QtGui.QColor(base)
@@ -294,11 +315,10 @@ class SubtitleOverlay(QtWidgets.QLabel):
                 for ox, oy in directions:
                     p.setPen(sc)
                     p.drawText(
-                        text_rect.translated(dist + ox * r, dist + oy * r),
-                        int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
+                        rect.translated(dist + ox * r, dist + oy * r),
+                        flags,
                         text,
                     )
-        # 外框（多方向覆蓋達到粗細）
         if self.settings.outline_enabled and text:
             p.setPen(self.settings.outline_color)
             base_w = max(1, int(self.settings.outline_width))
@@ -307,16 +327,9 @@ class SubtitleOverlay(QtWidgets.QLabel):
                 for dy in range(-w, w + 1):
                     if dx == 0 and dy == 0:
                         continue
-                    p.drawText(
-                        text_rect.translated(dx, dy),
-                        int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop),
-                        text,
-                    )
-        # 本體文字
+                    p.drawText(rect.translated(dx, dy), flags, text)
         p.setPen(self._effective_color())
-        p.drawText(
-            text_rect, int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop), text
-        )
+        p.drawText(rect, flags, text)
         if self.border_visible:
             pen = QtGui.QPen(QtGui.QColor("#CCCCCC"))
             pen.setWidth(2)
@@ -358,6 +371,22 @@ class SubtitleOverlay(QtWidgets.QLabel):
         ms = base + bonus
         return int(min(max(ms, 1500), 6000))
 
+    def _display_realtime(self):
+        fm = QtGui.QFontMetrics(self.font())
+        margin = 2 * self.margin()
+        line_h = fm.lineSpacing()
+        avail_h = max(1, self.height() - margin)
+        max_lines = max(1, avail_h // line_h)
+        lines = self._current_text.splitlines()
+        display_text = "\n".join(lines[-max_lines:])
+        self.setText(display_text)
+        self.repaint()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        if self.settings.strategy == "realtime" and self._current_text:
+            self._display_realtime()
+
     def show_entry_text(self, text: str):
         # 預覽優先：勾選預覽時永遠顯示預覽文字
         if self.settings.preview:
@@ -368,6 +397,27 @@ class SubtitleOverlay(QtWidgets.QLabel):
                 max(self.minimumWidth(), 600), self.minimumHeight()
             )
             self.repaint()
+            return
+        if self.settings.strategy == "realtime":
+            if not text.strip():
+                self._current_text = ""
+                self.setText("")
+                self.repaint()
+                self.display_timer.stop()
+                return
+            fm = QtGui.QFontMetrics(self.font())
+            margin = 2 * self.margin()
+            line_h = fm.lineSpacing()
+            avail_h = max(1, self.height() - margin)
+            max_lines = max(1, avail_h // line_h)
+            avg_w = max(1, fm.averageCharWidth())
+            avail_w = max(1, self.width() - margin)
+            max_chars = max_lines * (avail_w // avg_w) * 2
+            if len(text) > max_chars:
+                text = text[-max_chars:]
+            self._current_text = text
+            self._display_realtime()
+            self.display_timer.stop()
             return
         if text == self._current_text:
             return
