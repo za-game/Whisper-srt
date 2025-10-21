@@ -7,6 +7,7 @@ Realtime Whisper → SRT 字幕工具（2025-07-30  C-full  - 強化除錯版）
 •  `--device` 現在真正生效，並自動檢查裝置能力。
 •  程式碼重新分區塊，便於維護與閱讀。
 •  新增 realtime 字幕策略，可即時修正顯示。
+•  新增 efficient 即時模式：優先保留修正版字幕，降低漏字同時維持低負載。
 
 建議指令：
 ```bash
@@ -71,6 +72,7 @@ samples_lock = threading.Lock()
 audio_t0: float | None = None     # ADC 時基
 audio_origin: float | None = None # 給 SRT 的零時標
 _punct_re = re.compile(r"[，。？！；、,.!?;:…]")
+COMMIT_TAILS = tuple("。！？!?…．.；;：:")
 
 conf_thr_base = 0.4
 conf_thr_max = 0.8
@@ -167,6 +169,10 @@ parser.add_argument("--zh", default="s2twp", choices=["none", "t2tw", "s2t", "s2
 # 3-6 SRT輸出
 parser.add_argument("--srt_path", default="live.srt",
                     help="輸出 SRT 檔案完整路徑，預設為 live.srt")
+
+# 3-7 即時模式
+parser.add_argument("--rt-mode", default="balanced", choices=["balanced", "efficient"],
+                    help="balanced=預設策略；efficient=高精度低負載模式，可降低漏字風險")
 args = parser.parse_args()
 AUTO_VAD = args.auto_vad
 TEMPERATURES = [float(t) for t in args.temperature.split(",") if t.strip()]
@@ -208,8 +214,14 @@ if args.translate:
             pair = ("en", args.translate_lang)
         _translate_pair = pair
 
+RT_MODE = args.rt_mode
+
 conf_thr_base = args.conf_base
 conf_thr_max = args.conf_max
+if RT_MODE == "efficient":
+    conf_thr_base = min(conf_thr_base, 0.35)
+    conf_thr_max = min(conf_thr_max, 0.65)
+    CONF_THR_STEP = 0.01
 conf_thr = conf_thr_base
 
 # ─────────────────────────────────────────────────────────────
@@ -583,6 +595,10 @@ speech_hist: Deque[Tuple[float, float]] = deque()
 speech_peak = 0.0
 
 DEDUP_WIN = 3.0; SIM_THR = 0.85; MERGE_WIN = 1.0
+if RT_MODE == "efficient":
+    DEDUP_WIN = 4.0
+    SIM_THR = 0.8
+    MERGE_WIN = 1.5
 
 if FS_IN not in SUPPORTED_VAD_SR:
     log.warning("裝置採樣率 %d Hz 不是 VAD 支援值，將自動重採樣到 48k", FS_IN)
@@ -867,8 +883,22 @@ def flush(live: List[dict]):
 def writer():
     live: List[dict] = []
     sliding: List[dict] = []
-    FLUSH_EVERY = 0.10
+    FLUSH_EVERY = 0.06 if RT_MODE == "efficient" else 0.10
     last_flush = time.monotonic()
+
+    def should_commit(rec: dict) -> bool:
+        text = rec.get("text", "")
+        if not text:
+            return False
+        if rec.get("reason") != "MAXHOP":
+            return True
+        return text.endswith(COMMIT_TAILS)
+
+    def commit_if_ready(rec: dict, *, force: bool = False):
+        nonlocal last_flush
+        if force or should_commit(rec):
+            flush(live); last_flush = time.monotonic()
+
     while True:
         rec = write_q.get(); now = rec["start"]
 
@@ -886,7 +916,7 @@ def writer():
                     write_q.task_done(); continue
                 live[-1] = rec
                 sliding[-1] = rec
-                flush(live); last_flush = time.monotonic()
+                commit_if_ready(rec)
                 write_q.task_done(); continue
             if rec["text"] == last["text"]:
                 write_q.task_done(); continue
@@ -894,17 +924,28 @@ def writer():
                 if rec["text"].startswith(last["text"]):
                     live[-1] = rec
                     sliding[-1] = rec
-                    flush(live); last_flush = time.monotonic()
+                    commit_if_ready(rec)
                     write_q.task_done(); continue
                 if last["text"].startswith(rec["text"]):
                     write_q.task_done(); continue
 
-        # 2) similarity dedup
-        if any(
-            _similar(rec["text"], s["text"]) >= SIM_THR
-            and abs(rec["start"] - s["start"]) < DEDUP_WIN
-            for s in sliding
-        ):
+        # 2) similarity dedup / refresh
+        matched = None
+        matched_sim = 0.0
+        for s in sliding:
+            if abs(rec["start"] - s["start"]) < DEDUP_WIN:
+                sim = _similar(rec["text"], s["text"])
+                if sim >= SIM_THR and sim > matched_sim:
+                    matched = s
+                    matched_sim = sim
+        if matched:
+            if RT_MODE == "efficient":
+                if (
+                    rec["text"] != matched["text"]
+                    or not math.isclose(rec["end"], matched["end"], abs_tol=1e-3)
+                ):
+                    matched.update(rec)
+                    commit_if_ready(rec)
             write_q.task_done(); continue
 
         # 3) merge MAXHOP back-to-back
@@ -918,7 +959,7 @@ def writer():
             ):
                 last.update(text=rec["text"], end=rec["end"], reason="MERGE")
                 sliding.append(last)
-                flush(live); last_flush = time.monotonic()
+                commit_if_ready(last, force=True)
                 write_q.task_done(); continue
 
         # 4) append & maintain sliding window
@@ -926,10 +967,10 @@ def writer():
         sliding = [s for s in sliding if now - s["start"] < DEDUP_WIN]
 
         # 5) flush conditions
-        if any(rec["text"].endswith(p) for p in "。！？…") or rec["reason"] == "MERGE":
-            flush(live); last_flush = time.monotonic()
-        elif time.monotonic() - last_flush >= FLUSH_EVERY:
-            flush(live); last_flush = time.monotonic()
+        if rec["text"].endswith(COMMIT_TAILS) or rec["reason"] == "MERGE":
+            commit_if_ready(rec, force=True)
+        elif time.monotonic() - last_flush >= FLUSH_EVERY and live:
+            commit_if_ready(live[-1])
 
         write_q.task_done()
 

@@ -667,6 +667,13 @@ class BootstrapWin(QtWidgets.QMainWindow):
         form_layout.addRow("VAD", self.vad_combo)
         form_layout.labelForField(self.vad_combo).setToolTip(self.vad_combo.toolTip())
 
+        self.rt_mode_combo = QtWidgets.QComboBox()
+        self.rt_mode_combo.addItem("標準", "balanced")
+        self.rt_mode_combo.addItem("高精準低負載", "efficient")
+        self.rt_mode_combo.setToolTip("標準：即時字幕預設策略；高精準低負載：降低漏字並維持低資源耗用")
+        form_layout.addRow("即時模式", self.rt_mode_combo)
+        form_layout.labelForField(self.rt_mode_combo).setToolTip(self.rt_mode_combo.toolTip())
+
         # 音量門檻滑桿與即時音量條
         self.mic_level_bar = QtWidgets.QProgressBar()
         self.mic_level_bar.setRange(0, 100)
@@ -804,6 +811,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             lambda text: self.audio_sr_combo.setToolTip(text)
         )
         self.vad_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
+        self.rt_mode_combo.currentIndexChanged.connect(lambda _=None: self.schedule_autosave(300))
         self.silence_spin.valueChanged.connect(lambda _=None: self.schedule_autosave(300))
         # 主視窗移動/縮放 → autosave main_window_geometry
         self.installEventFilter(self)
@@ -1142,6 +1150,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 "audio_sr_index": self.audio_sr_combo.currentIndex(),
                 "audio_sr_value": self.audio_sr_combo.currentData(),
                 "vad": self.vad_combo.currentText(),
+                "rt_mode": self.rt_mode_combo.currentData(),
                 "mic_gate": int(self.mic_slider.value()),
                 "silence": float(self.silence_spin.value()),
             },
@@ -1207,6 +1216,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
             vad = gui.get("vad")
             if vad and self.vad_combo.findText(str(vad)) >= 0:
                 self.vad_combo.setCurrentText(str(vad))
+            rt_mode = gui.get("rt_mode")
+            if rt_mode:
+                idx = self.rt_mode_combo.findData(rt_mode)
+                if idx >= 0:
+                    self.rt_mode_combo.setCurrentIndex(idx)
             mic_gate = gui.get("mic_gate")
             if mic_gate is not None:
                 try:
@@ -1279,7 +1293,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self._write_project()
 
     def _watch_mode(self) -> str:
-        return "realtime" if getattr(self.settings, "strategy", "") == "realtime" else "last"
+        strategy = getattr(self.settings, "strategy", "")
+        return "realtime" if strategy in {"win11", "realtime"} else "last"
 
     def _settings_changed(self):
         if self.srt_watcher:
@@ -2018,6 +2033,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             args += ["--auto-vad", "--mic-thr", f"{thr:.6f}"]
         else:
             args += ["--vad_level", vad_opt]
+        args += ["--rt-mode", self.rt_mode_combo.currentData()]
         args += ["--silence", f"{self.silence_spin.value():.2f}"]
         args += ["--logprob-thr", f"{self.logprob_spin.value():.2f}"]
         args += ["--compression-ratio-thr", f"{self.comp_ratio_spin.value():.2f}"]
