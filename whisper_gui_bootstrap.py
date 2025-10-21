@@ -28,6 +28,7 @@ from typing import Any, Optional
 import subprocess
 import sys
 import base64
+import inspect
 import shutil
 import importlib.util
 from importlib import metadata
@@ -59,7 +60,7 @@ import numpy as np
 import locale
 from packaging import version
 from overlay import Settings, SubtitleOverlay, Tray
-from srt_utils import LiveSRTWatcher
+from srt_utils import LiveSRTWatcher, realtime_path_for
 ROOT_DIR = Path(__file__).resolve().parent
 ENGINE_PY = ROOT_DIR / "mWhisperSub.py"
 OVERLAY_PY = ROOT_DIR / "srt_overlay_tool.py"
@@ -403,7 +404,7 @@ class _ProgressWorker(QtCore.QThread):
 def is_installed(pkg):
     return importlib.util.find_spec(pkg) is not None
 
-def run_pip(args, log_fn=None, cancel_flag=None):
+def run_pip(args, log_fn=None, cancel_flag=None, progress_cb=None):
     cmd = [sys.executable, "-m", "pip"] + args
     if log_fn:
         log_fn(f"執行: {' '.join(cmd)}")
@@ -416,10 +417,34 @@ def run_pip(args, log_fn=None, cancel_flag=None):
     )
     cancelled = False
     try:
+        if progress_cb:
+            progress_cb(0, " ".join(args))
         assert proc.stdout is not None
-        for line in proc.stdout:
+        for raw_line in proc.stdout:
+            line = raw_line.rstrip("\n")
+            printable = line.split("\r")[-1].rstrip()
+            display = printable or line.strip()
             if log_fn:
-                log_fn(line.rstrip())
+                log_fn(display)
+            if progress_cb:
+                pct = None
+                match = re.search(r"(\d{1,3})%", printable)
+                if match:
+                    try:
+                        pct = int(match.group(1))
+                    except Exception:
+                        pct = None
+                if pct is not None:
+                    pct = max(0, min(100, pct))
+                    progress_cb(pct, display)
+                elif printable.startswith("Collecting "):
+                    progress_cb(5, display)
+                elif printable.startswith("Downloading "):
+                    progress_cb(25, display)
+                elif printable.startswith("Installing collected packages"):
+                    progress_cb(90, display)
+                elif printable.startswith("Successfully installed"):
+                    progress_cb(100, display)
             if cancel_flag and cancel_flag():
                 proc.terminate()
                 cancelled = True
@@ -432,15 +457,31 @@ def run_pip(args, log_fn=None, cancel_flag=None):
         raise RuntimeError("使用者取消")
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd)
+    if progress_cb:
+        progress_cb(100, "完成")
 
-def install_deps(cuda_tag, torch_ver=None, index_url=None, log_fn=None, cancel_flag=None):
+def install_deps(cuda_tag, torch_ver=None, index_url=None, log_fn=None, cancel_flag=None, progress_cb=None):
     torch_pkg = f"torch=={torch_ver}" if torch_ver else "torch"
     index = index_url or f"https://download.pytorch.org/whl/{'cpu' if cuda_tag == 'cpu' else cuda_tag}"
+    def stage_cb(start: int, end: int, message: str):
+        if not progress_cb:
+            return None
+        span = max(1, end - start)
+        def mapper(pct: int, text: str | None = None):
+            pct = max(0, min(100, int(pct)))
+            value = start + int(span * pct / 100)
+            progress_cb(value, text or message)
+        return mapper
+    if progress_cb:
+        progress_cb(0, "解除安裝舊版 torch…")
     run_pip(
         ["uninstall", "-y", "torch", "torchvision", "torchaudio"],
         log_fn=log_fn,
         cancel_flag=cancel_flag,
+        progress_cb=stage_cb(0, 20, "解除安裝舊版 torch…"),
     )
+    if progress_cb:
+        progress_cb(20, "安裝 PyTorch…")
     pkgs = [
         torch_pkg,
         "torchvision",
@@ -448,8 +489,15 @@ def install_deps(cuda_tag, torch_ver=None, index_url=None, log_fn=None, cancel_f
         "--index-url",
         index,
     ]
-    run_pip(["install", "--upgrade"] + pkgs, log_fn=log_fn, cancel_flag=cancel_flag)
+    run_pip(
+        ["install", "--upgrade"] + pkgs,
+        log_fn=log_fn,
+        cancel_flag=cancel_flag,
+        progress_cb=stage_cb(20, 75, "安裝 PyTorch…"),
+    )
     # faster-whisper 與 PyQt5
+    if progress_cb:
+        progress_cb(75, "安裝語音相關套件…")
     run_pip(
         [
             "install",
@@ -463,10 +511,15 @@ def install_deps(cuda_tag, torch_ver=None, index_url=None, log_fn=None, cancel_f
             "srt",
             "tqdm",
             "huggingface_hub",
+            "transformers",
+            "sentencepiece",
         ],
         log_fn=log_fn,
         cancel_flag=cancel_flag,
+        progress_cb=stage_cb(75, 100, "安裝語音相關套件…"),
     )
+    if progress_cb:
+        progress_cb(100, "安裝完成")
 
 # Hugging Face authentication helper
 def _prompt_hf_token() -> bool:
@@ -545,11 +598,23 @@ class BootstrapWin(QtWidgets.QMainWindow):
         form_layout = QtWidgets.QFormLayout()
 
         # 模型選擇
+        self._model_support: dict[str, bool] = {}
+        self._translate_support: dict[str, bool] = {}
+        self._model_check_running = False
+        self._model_support_checked = False
         self.model_combo = QtWidgets.QComboBox()
         for m in ["tiny", "base", "small", "medium", "large-v2"]:
             self.model_combo.addItem(m, m)
-        form_layout.addRow("模型", self.model_combo)
+        model_row_widget = QtWidgets.QWidget()
+        model_row_layout = QtWidgets.QHBoxLayout(model_row_widget)
+        model_row_layout.setContentsMargins(0, 0, 0, 0)
+        model_row_layout.addWidget(self.model_combo, 1)
+        self.model_check_btn = QtWidgets.QPushButton("檢查模型")
+        self.model_check_btn.setToolTip("檢查 Hugging Face 模型來源是否可用並更新狀態")
+        model_row_layout.addWidget(self.model_check_btn, 0)
+        form_layout.addRow("模型", model_row_widget)
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
+        self.model_check_btn.clicked.connect(self._on_model_check)
 
         # 語言選擇
         self.lang_combo = QtWidgets.QComboBox()
@@ -855,36 +920,49 @@ class BootstrapWin(QtWidgets.QMainWindow):
         for i, code in enumerate(opts):
             tgt = code.lower()
             available = True
-            suffix = ""
+            suffixes: list[str] = []
+            brush_color: QtGui.QColor | None = None
+            trans_support_ok = True
             if src.lower() == "auto":
                 repos = [v for (s, t), v in TRANSLATE_REPO_MAP.items() if t == tgt]
-                need_upgrade = any(
-                    repo.startswith("facebook/") and (not torch_ver or torch_ver < MIN_TORCH)
-                    for repo in repos
-                )
-                downloaded = all(self._translate_model_downloaded(repo) for repo in repos)
-                if need_upgrade:
-                    available = False
-                    suffix = " (請升級Torch)"
-                elif not downloaded:
-                    available = False
-                    suffix = " (未下載)"
+                if repos:
+                    trans_support_ok = all(self._translate_support.get(repo, True) for repo in repos)
+                    need_upgrade = any(
+                        repo.startswith("facebook/") and (not torch_ver or torch_ver < MIN_TORCH)
+                        for repo in repos
+                    )
+                    downloaded = all(self._translate_model_downloaded(repo) for repo in repos)
+                else:
+                    need_upgrade = False
+                    downloaded = True
             else:
                 repo = TRANSLATE_REPO_MAP.get((src.lower(), tgt))
                 if repo:
+                    trans_support_ok = self._translate_support.get(repo, True)
                     need_upgrade = repo.startswith("facebook/") and (
                         not torch_ver or torch_ver < MIN_TORCH
                     )
                     downloaded = self._translate_model_downloaded(repo)
-                    if need_upgrade:
-                        available = False
-                        suffix = " (請升級Torch)"
-                    elif not downloaded:
-                        available = False
-                        suffix = " (未下載)"
+                else:
+                    need_upgrade = False
+                    downloaded = True
+            if not trans_support_ok:
+                available = False
+                suffixes.append("不支援")
+                brush_color = QtGui.QColor("#c62828")
+            if need_upgrade:
+                available = False
+                suffixes.append("請升級Torch")
+                brush_color = brush_color or QtGui.QColor("#c62828")
+            if not downloaded:
+                available = False
+                suffixes.append("未下載")
+                if brush_color is None:
+                    brush_color = QtGui.QColor("gray")
+            suffix = f" ({' / '.join(suffixes)})" if suffixes else ""
             text = f"{code}{suffix}"
             self.translate_lang_combo.addItem(text, code)
-            brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
+            brush = QtGui.QBrush(brush_color) if brush_color is not None else None
             model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
             if available:
                 available_items.append((i, code))
@@ -937,11 +1015,25 @@ class BootstrapWin(QtWidgets.QMainWindow):
                 if not base:
                     continue
                 available = self._model_downloaded(base)
-                text = base if available else f"{base} (未下載)"
+                support = self._model_support.get(base, True)
+                suffixes: list[str] = []
+                if support is False:
+                    suffixes.append("不支援")
+                if not available:
+                    suffixes.append("未下載")
+                text = base
+                if suffixes:
+                    text += f" ({' / '.join(suffixes)})"
                 self.model_combo.setItemText(i, text)
-                brush = None if available else QtGui.QBrush(QtGui.QColor("gray"))
+                brush: QtGui.QBrush | None
+                if support is False:
+                    brush = QtGui.QBrush(QtGui.QColor("#c62828"))
+                elif not available:
+                    brush = QtGui.QBrush(QtGui.QColor("gray"))
+                else:
+                    brush = None
                 model.setData(model.index(i, 0), brush, QtCore.Qt.ForegroundRole)
-                if available:
+                if available and support is not False:
                     available_names.append(base)
             placeholder_idx = self.model_combo.findData("")
             if available_names:
@@ -959,6 +1051,85 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self.model_combo.blockSignals(False)
         self._last_model_index = self.model_combo.currentIndex()
 
+    def _on_model_check(self) -> None:
+        self._check_model_support(auto=False)
+
+    def _check_model_support(self, auto: bool = False) -> None:
+        if self._model_check_running:
+            return
+        model_entries = list(MODEL_REPO_MAP.items())
+        translate_entries = list(TRANSLATE_REPO_MAP.items())
+        if not model_entries and not translate_entries:
+            return
+        self._model_check_running = True
+
+        def task(is_cancelled, report):
+            try:
+                from huggingface_hub import HfApi
+            except Exception as exc:  # pragma: no cover - dependency missing
+                raise RuntimeError("缺少 huggingface_hub，請先完成套件安裝") from exc
+            api = HfApi()
+            model_support: dict[str, bool] = {}
+            translate_support: dict[str, bool] = {}
+            combined: list[tuple[str, str, str]] = []
+            for name, repo in model_entries:
+                combined.append(("model", name, repo))
+            for key, repo in translate_entries:
+                if isinstance(key, tuple) and len(key) == 2:
+                    label = f"翻譯 {key[0]}→{key[1]}"
+                else:
+                    label = f"翻譯 {str(key).replace('-', '→')}"
+                combined.append(("translate", label, repo))
+            total = len(combined)
+            for idx, (kind, name, repo) in enumerate(combined, 1):
+                if is_cancelled():
+                    raise RuntimeError("使用者取消")
+                progress = int((idx - 1) * 100 / total)
+                report(progress, f"檢查 {name}")
+                try:
+                    api.model_info(repo, timeout=10)
+                except Exception:
+                    ok = False
+                else:
+                    ok = True
+                if kind == "model":
+                    model_support[name] = ok
+                else:
+                    translate_support[repo] = ok
+                report(int(idx * 100 / total), f"檢查 {name}")
+            report(100, "檢查完成")
+            return {"models": model_support, "translate": translate_support}
+
+        try:
+            result = self._run_with_progress(
+                "檢查模型來源", task, label="檢查模型中…"
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            if message == "使用者取消":
+                self._ui_log("取消模型來源檢查")
+            else:
+                self._ui_log(f"模型檢查失敗: {message}")
+                if not auto:
+                    QtWidgets.QMessageBox.warning(self, "檢查失敗", message)
+        else:
+            if isinstance(result, dict):
+                self._model_support = result.get("models", {})
+                self._translate_support = result.get("translate", {})
+                unsupported_models = [name for name, ok in self._model_support.items() if not ok]
+                unsupported_trans = [repo for repo, ok in self._translate_support.items() if not ok]
+                if unsupported_models:
+                    self._ui_log("以下模型目前無法確認支援：{}".format(", ".join(unsupported_models)))
+                if unsupported_trans:
+                    self._ui_log("以下翻譯模型目前無法確認支援：{}".format(", ".join(unsupported_trans)))
+                if not unsupported_models and not unsupported_trans:
+                    self._ui_log("所有模型來源皆可用。")
+                self._refresh_model_items()
+                self._update_translate_lang_options()
+                self._model_support_checked = True
+        finally:
+            self._model_check_running = False
+
     def _set_model_name(self, name: str):
         for i in range(self.model_combo.count()):
             if self.model_combo.itemData(i) == name:
@@ -973,6 +1144,10 @@ class BootstrapWin(QtWidgets.QMainWindow):
         if not base:
             self._last_model_index = idx
             return
+        if self._model_support.get(base) is False:
+            warn_msg = f"模型 {base} 目前檢測為不支援，請選擇其他模型或更新設定。"
+            QtWidgets.QMessageBox.warning(self, "模型不支援", warn_msg)
+            self._ui_log(warn_msg)
         if not self._model_downloaded(base):
             resp = QtWidgets.QMessageBox.question(
                 self,
@@ -1701,12 +1876,13 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self._ui_log("需要安裝相應套件。")
 
     def _run_with_progress(self, title: str, task, label: str = "處理中…"):
-        dlg = QtWidgets.QProgressDialog(label, "取消", 0, 0, self)
+        dlg = QtWidgets.QProgressDialog(label, "取消", 0, 100, self)
         dlg.setWindowTitle(title)
         dlg.setWindowModality(QtCore.Qt.WindowModal)
         dlg.setMinimumWidth(480)
         bar = QtWidgets.QProgressBar(dlg)
-        bar.setRange(0, 0)
+        bar.setRange(0, 100)
+        bar.setValue(0)
         dlg.setBar(bar)
 
         cancelled = [False]
@@ -1717,7 +1893,35 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
         dlg.canceled.connect(on_cancel)
 
-        worker = _ProgressWorker(task, cancelled)
+        def report_progress(value: float | int, text: str | None = None):
+            try:
+                pct = int(round(float(value)))
+            except Exception:
+                pct = 0
+            pct = max(0, min(100, pct))
+            QtCore.QMetaObject.invokeMethod(
+                bar,
+                "setValue",
+                QtCore.Qt.QueuedConnection,
+                QtCore.Q_ARG(int, pct),
+            )
+            if text:
+                QtCore.QMetaObject.invokeMethod(
+                    dlg,
+                    "setLabelText",
+                    QtCore.Qt.QueuedConnection,
+                    QtCore.Q_ARG(str, text),
+                )
+
+        signature = inspect.signature(task)
+        expect_progress = len(signature.parameters) >= 2
+
+        def task_wrapper(is_cancelled):
+            if expect_progress:
+                return task(is_cancelled, report_progress)
+            return task(is_cancelled)
+
+        worker = _ProgressWorker(task_wrapper, cancelled)
 
         def on_finished(data, err):
             result["data"] = data
@@ -1729,6 +1933,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
             dlg.close()
 
         worker.finished.connect(on_finished)
+        report_progress(0, label)
         worker.start()
         dlg.exec()
         worker.wait()
@@ -1743,10 +1948,11 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self._ui_log("解除安裝 torch/CUDA…")
             self._run_with_progress(
                 "解除安裝 torch/CUDA",
-                lambda is_cancelled: run_pip(
+                lambda is_cancelled, report: run_pip(
                     ["uninstall", "-y", "torch", "torchvision", "torchaudio"],
                     log_fn=self._ui_log,
                     cancel_flag=is_cancelled,
+                    progress_cb=lambda pct, text=None: report(pct, text or "解除安裝中…"),
                 ),
                 label="解除安裝中…",
             )
@@ -1756,7 +1962,8 @@ class BootstrapWin(QtWidgets.QMainWindow):
 
     def install_torch_cuda(self):
         try:
-            def task(is_cancelled):
+            def task(is_cancelled, report):
+                report(0, "分析環境…")
                 py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
                 plat = "win_amd64" if sys.platform.startswith("win") else "linux_x86_64"
                 if FORCE_CUDA:
@@ -1808,6 +2015,7 @@ class BootstrapWin(QtWidgets.QMainWindow):
                     index_url=index,
                     log_fn=self._ui_log,
                     cancel_flag=is_cancelled,
+                    progress_cb=report,
                 )
                 return {"cuda_tag": chosen_tag, "gpu_name": gpu_name}
 
@@ -1987,11 +2195,56 @@ class BootstrapWin(QtWidgets.QMainWindow):
             self._ui_log(f"使用 Hugging Face 模型：{repo}（若已在快取將直接重用）")
         # 語言（你預設要 zh；UI 選擇一律明確傳遞，避免分支縮排導致漏傳）
         args += ["--lang", self.lang_combo.currentText()]
+        translate_lang_code = None
         if self.translate_chk.isChecked():
+            src_lang = self.lang_combo.currentText().strip().lower()
+            translate_lang_code = self.translate_lang_combo.currentData()
+            if not translate_lang_code:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "翻譯設定不完整",
+                    "請在翻譯語言清單中選擇有效的目標語言。",
+                )
+                return
+            tgt_lang = str(translate_lang_code).strip().lower()
+            missing_dep = []
+            if importlib.util.find_spec("transformers") is None:
+                missing_dep.append("transformers")
+            if importlib.util.find_spec("sentencepiece") is None:
+                missing_dep.append("sentencepiece")
+            if missing_dep:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "缺少翻譯依賴",
+                    "翻譯功能需要安裝：{}".format(", ".join(missing_dep)),
+                )
+                return
+            repos: list[str] = []
+            if src_lang == "auto":
+                repos = [v for (s, t), v in TRANSLATE_REPO_MAP.items() if t == tgt_lang]
+            else:
+                repo = TRANSLATE_REPO_MAP.get((src_lang, tgt_lang))
+                if repo:
+                    repos.append(repo)
+            unsupported = [r for r in repos if self._translate_support.get(r, True) is False]
+            if unsupported:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "翻譯模型不支援",
+                    "以下翻譯模型目前無法使用：{}".format(", ".join(unsupported)),
+                )
+                return
+            missing_repos = [r for r in repos if not self._translate_model_downloaded(r)]
+            for repo in missing_repos:
+                try:
+                    self._download_model_with_progress(repo)
+                except Exception as e:
+                    QtWidgets.QMessageBox.warning(self, "下載失敗", str(e))
+                    return
             args += [
                 "--translate",
                 "--translate_lang",
-                self.translate_lang_combo.currentText().lower(),
+                tgt_lang,
             ]
         if self.console_chk.isChecked():
             args += ["--log", self.log_level_combo.currentText()]
@@ -2006,7 +2259,9 @@ class BootstrapWin(QtWidgets.QMainWindow):
             args += ["--hotwords_file", hot_p]
         # 指定 SRT 輸出路徑（搭配 mWhisperSub 的 --srt_path）
         if self.settings.srt_path:
+            rt_path = realtime_path_for(self.settings.srt_path)
             args += ["--srt_path", str(self.settings.srt_path)]
+            args += ["--realtime_path", str(rt_path)]
         # GPU 選擇
         if self.device_combo.currentText().startswith("cuda"):
             gpu_idx = self.gpu_combo.currentData()

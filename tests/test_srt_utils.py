@@ -2,7 +2,12 @@ from pathlib import Path
 import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
-from srt_utils import parse_srt_last_text, parse_srt_realtime_text, drop_covered_blocks
+from srt_utils import (
+    parse_srt_last_text,
+    parse_srt_realtime_text,
+    drop_covered_blocks,
+    realtime_path_for,
+)
 
 
 def test_parse_srt_last_text_basic(tmp_path):
@@ -28,6 +33,13 @@ def test_parse_srt_last_text_bom_and_blank(tmp_path):
     empty = tmp_path / "empty.srt"
     empty.write_text("\n", encoding="utf-8")
     assert parse_srt_last_text(empty) == ""
+
+
+def test_realtime_path_for_returns_sidecar(tmp_path):
+    srt = tmp_path / "foo.bar.srt"
+    path = realtime_path_for(srt)
+    assert path.name == "foo.bar.realtime.txt"
+    assert path.parent == tmp_path
 
 
 def test_parse_srt_realtime_text(tmp_path):

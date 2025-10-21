@@ -6,8 +6,11 @@ from PyQt5 import QtCore, QtWidgets, QtGui
 
 
 ROOT_DIR = Path(__file__).resolve().parent
-WIN11_PUNCTUATION = "。！？!?…．.；;：:"
-WIN11_SEGMENT_RE = re.compile(r"[^。！？!?…．\.\n\r:：;；]+(?:[。！？!?…．\.:：;；]+|$)")
+WIN11_PUNCTUATION = "。！？!?…．.；;：:,，、"
+WIN11_SEGMENT_RE = re.compile(
+    r"[^。！？!?…．\.,，、\n\r:：;；]+(?:[。！？!?…．\.,，、:：;；]+|$)"
+)
+WIN11_BREAK_CHARS = frozenset(WIN11_PUNCTUATION)
 
 
 class Settings(QtCore.QObject):
@@ -123,6 +126,9 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self._win11_anim_offset: float = 0.0
         self._win11_anim_step: float = 0.0
         self._win11_last_committed: str = ""
+        self._win11_user_height: int | None = None
+        self._win11_user_width: int | None = None
+        self._win11_resizing = False
         self._win11_anim = QtCore.QVariantAnimation(self)
         self._win11_anim.setDuration(220)
         self._win11_anim.setEasingCurve(QtCore.QEasingCurve.OutCubic)
@@ -133,11 +139,14 @@ class SubtitleOverlay(QtWidgets.QLabel):
         """Entry point for LiveSRTWatcher updates."""
         self.show_entry_text(text)
     def _update_min_size(self):
+        fm = QtGui.QFontMetrics(self.font())
         fm_f = QtGui.QFontMetricsF(self.font())
-        char_w = QtGui.QFontMetrics(self.font()).horizontalAdvance("W" * 6)
+        char_w = fm.horizontalAdvance("W" * 6)
         line_h = math.ceil(fm_f.height())
-        self.MIN_W = int(char_w + 20)
-        self.MIN_H = int(line_h + 20)
+        min_w = max(self.BASE_MIN_W, int(char_w + 20))
+        min_h = max(int(line_h + 20), int(fm.lineSpacing() * 1.1))
+        self.MIN_W = min_w
+        self.MIN_H = min_h
         self.setMinimumSize(self.MIN_W, self.MIN_H)
 
     # --- Serialization of overlay geometry and text style ---
@@ -263,15 +272,14 @@ class SubtitleOverlay(QtWidgets.QLabel):
                 align |= QtCore.Qt.AlignHCenter
             self.setAlignment(align)
             self.setWordWrap(False)
-            self.MIN_W, self.MIN_H = 720, 160
-            self.setMinimumSize(self.MIN_W, self.MIN_H)
         else:
+            self._win11_user_height = None
+            self._win11_user_width = None
             self.setAlignment(
                 QtCore.Qt.Alignment(self.settings.align) | QtCore.Qt.AlignVCenter
             )
             self.setWordWrap(False)
-            self.MIN_W, self.MIN_H = 600, self.BASE_MIN_H
-            self.setMinimumSize(self.MIN_W, self.MIN_H)
+        self._update_min_size()
         self.repaint()
 
     # 拖曳移動
@@ -286,6 +294,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
                 self._resize_origin = ev.globalPos()
                 self._resize_rect = self.geometry()
                 self._resize_zone = zone
+                self._win11_resizing = True
                 self.setCursor(self._cursor_for_zone(zone))
                 ev.accept()
             else:
@@ -314,7 +323,19 @@ class SubtitleOverlay(QtWidgets.QLabel):
             if "bottom" in self._resize_zone:
                 new_bottom = max(r.top() + self.MIN_H, r.bottom() + delta.y())
                 r.setBottom(new_bottom)
+            if self.settings.strategy in {"win11", "realtime"}:
+                new_width = r.width()
+                new_height = r.height()
+                if any(k in self._resize_zone for k in ("left", "right")):
+                    self._win11_user_width = max(self.MIN_W, int(new_width))
+                if any(k in self._resize_zone for k in ("top", "bottom")):
+                    self._win11_user_height = max(self.MIN_H, int(new_height))
             self.setGeometry(r)
+            if self.settings.strategy in {"win11", "realtime"}:
+                if self._resize_zone and any(k in self._resize_zone for k in ("top", "bottom")):
+                    self._win11_user_height = self.height()
+                if self._resize_zone and any(k in self._resize_zone for k in ("left", "right")):
+                    self._win11_user_width = self.width()
             ev.accept()
             return
         if ev.buttons() & QtCore.Qt.LeftButton and self._drag_pos is not None:
@@ -330,9 +351,23 @@ class SubtitleOverlay(QtWidgets.QLabel):
     def mouseReleaseEvent(self, ev: QtGui.QMouseEvent):
         if ev.button() == QtCore.Qt.LeftButton:
             if self._resize_origin is not None:
+                if (
+                    self.settings.strategy in {"win11", "realtime"}
+                    and self._resize_zone
+                ):
+                    if any(k in self._resize_zone for k in ("top", "bottom")):
+                        self._win11_user_height = self.height()
+                    if any(k in self._resize_zone for k in ("left", "right")):
+                        self._win11_user_width = self.width()
                 self._resize_origin = None
                 self._resize_rect = None
                 self._resize_zone = None
+                if self.settings.strategy in {"win11", "realtime"}:
+                    self._win11_user_width = max(self.MIN_W, int(self.width()))
+                    self._win11_user_height = max(self.MIN_H, int(self.height()))
+                    self._win11_resizing = False
+                    if self._current_text:
+                        self._update_win11_caption(self._current_text, force=True)
                 self.setCursor(QtCore.Qt.ArrowCursor)
                 ev.accept()
                 return
@@ -473,10 +508,19 @@ class SubtitleOverlay(QtWidgets.QLabel):
         fm = QtGui.QFontMetrics(self.font())
         layout_new = self._compute_win11_layout(rect, lines)
         wrapped_new, sources_new, line_spacing, spacing, padding_x, padding_y = layout_new
+        visible_cap = self._win11_visible_segment_capacity(
+            rect, line_spacing, spacing, padding_y
+        )
+        wrapped_new, sources_new = self._win11_limit_segments(
+            wrapped_new, sources_new, visible_cap
+        )
         layout_prev = (
             self._compute_win11_layout(rect, prev_lines) if prev_lines else ([], [], line_spacing, spacing, padding_x, padding_y)
         )
         wrapped_prev, sources_prev, _, _, _, _ = layout_prev
+        wrapped_prev, sources_prev = self._win11_limit_segments(
+            wrapped_prev, sources_prev, visible_cap
+        )
         total_new = self._win11_total_height(len(wrapped_new), line_spacing, spacing)
         base_new = rect.bottom() - total_new
         align = QtCore.Qt.Alignment(self.alignment())
@@ -489,13 +533,13 @@ class SubtitleOverlay(QtWidgets.QLabel):
         base_color = self._effective_color()
         inactive = QtGui.QColor(base_color)
         inactive.setAlphaF(max(0.35, min(1.0, base_color.alphaF() * 0.65)))
-        if getattr(self.settings, "bg_enabled", False):
+        use_bg = bool(getattr(self.settings, "bg_enabled", False))
+        if use_bg:
             bg_active = QtGui.QColor(self.settings.bg_color)
             bg_inactive = QtGui.QColor(self.settings.bg_color)
             bg_inactive.setAlphaF(max(0.0, min(1.0, bg_inactive.alphaF() * 0.6)))
         else:
-            bg_active = QtGui.QColor(18, 18, 24, 220)
-            bg_inactive = QtGui.QColor(18, 18, 24, 150)
+            bg_active = bg_inactive = None
         radius = max(10, int(line_spacing * 0.45))
         offset = float(self._win11_anim_offset if anim_running else 0.0)
         step = float(self._win11_anim_step if anim_running else 0.0)
@@ -503,6 +547,55 @@ class SubtitleOverlay(QtWidgets.QLabel):
         highlight_sources = set()
         if highlight_source >= 0:
             highlight_sources.add(highlight_source)
+
+        def _draw_text_with_style(draw_rect: QtCore.QRectF, text: str, color: QtGui.QColor) -> None:
+            if not text:
+                return
+            flags = int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            painter.save()
+            if self.settings.shadow_enabled:
+                base = QtGui.QColor(self.settings.shadow_color)
+                alpha = max(0.0, min(1.0, float(self.settings.shadow_alpha)))
+                dist = max(0, int(self.settings.shadow_dist))
+                blur = max(0, int(self.settings.shadow_blur))
+                directions = [
+                    (1, 0),
+                    (-1, 0),
+                    (0, 1),
+                    (0, -1),
+                    (1, 1),
+                    (1, -1),
+                    (-1, 1),
+                    (-1, -1),
+                ]
+                sc = QtGui.QColor(base)
+                sc.setAlphaF(alpha)
+                painter.setPen(sc)
+                painter.drawText(draw_rect.translated(dist, dist), flags, text)
+                for r in range(1, blur + 1):
+                    fall = alpha * (1 - r / (blur + 1)) ** 2
+                    sc = QtGui.QColor(base)
+                    sc.setAlphaF(fall)
+                    for ox, oy in directions:
+                        painter.setPen(sc)
+                        painter.drawText(
+                            draw_rect.translated(dist + ox * r, dist + oy * r),
+                            flags,
+                            text,
+                        )
+            if self.settings.outline_enabled:
+                outline = QtGui.QColor(self.settings.outline_color)
+                base_w = max(1, int(self.settings.outline_width))
+                w = max(1, int(base_w * self.font().pointSize() / 32))
+                for dx in range(-w, w + 1):
+                    for dy in range(-w, w + 1):
+                        if dx == 0 and dy == 0:
+                            continue
+                        painter.setPen(outline)
+                        painter.drawText(draw_rect.translated(dx, dy), flags, text)
+            painter.setPen(QtGui.QColor(color))
+            painter.drawText(draw_rect, flags, text)
+            painter.restore()
 
         def _draw_lines(
             items: list[str],
@@ -527,7 +620,6 @@ class SubtitleOverlay(QtWidgets.QLabel):
                 else:
                     x = rect.left() + (rect.width() - width) // 2
                 text_x = int(x)
-                text_y = int(y + fm.ascent())
                 bg_rect = QtCore.QRect(
                     text_x - padding_x,
                     int(y - padding_y * 0.35),
@@ -542,13 +634,19 @@ class SubtitleOverlay(QtWidgets.QLabel):
                     shift = bg_rect.right() - rect.right()
                     bg_rect.translate(-shift, 0)
                     text_x -= shift
-                painter.setPen(QtCore.Qt.NoPen)
                 source_id = sources[idx] if idx < len(sources) else -1
                 highlight = source_id in highlight_targets
-                painter.setBrush(bg_active if highlight else bg_inactive)
-                painter.drawRoundedRect(bg_rect, radius, radius)
-                painter.setPen(base_color if highlight else inactive)
-                painter.drawText(QtCore.QPoint(text_x, text_y), text)
+                if use_bg and bg_active:
+                    painter.setPen(QtCore.Qt.NoPen)
+                    painter.setBrush(bg_active if highlight else bg_inactive)
+                    painter.drawRoundedRect(bg_rect, radius, radius)
+                line_height = max(line_spacing, 1.0)
+                text_rect = QtCore.QRectF(float(text_x), float(y), float(width), float(line_height))
+                _draw_text_with_style(
+                    text_rect,
+                    text,
+                    base_color if highlight else inactive,
+                )
                 y += line_spacing
                 if idx < count - 1:
                     y += spacing
@@ -747,14 +845,25 @@ class SubtitleOverlay(QtWidgets.QLabel):
         if not force and lines == prev_lines:
             return
         rect = self._content_rect()
-        wrapped_new, _, line_spacing, spacing, _, _ = self._compute_win11_layout(rect, lines)
-        total_new = self._win11_total_height(len(wrapped_new), line_spacing, spacing)
+        wrapped_new, sources_new, line_spacing, spacing, padding_x, padding_y = self._compute_win11_layout(
+            rect, lines
+        )
+        visible_cap = self._win11_visible_segment_capacity(
+            rect, line_spacing, spacing, padding_y
+        )
+        visible_wrapped, visible_sources = self._win11_limit_segments(
+            wrapped_new, sources_new, visible_cap
+        )
+        total_new = self._win11_total_height(len(visible_wrapped), line_spacing, spacing)
         if prev_lines:
-            wrapped_prev, _, prev_line_spacing, prev_spacing, _, _ = self._compute_win11_layout(
+            wrapped_prev, sources_prev, prev_line_spacing, prev_spacing, _, _ = self._compute_win11_layout(
                 rect, prev_lines
             )
+            visible_prev, _ = self._win11_limit_segments(
+                wrapped_prev, sources_prev, visible_cap
+            )
             total_prev = self._win11_total_height(
-                len(wrapped_prev), prev_line_spacing, prev_spacing
+                len(visible_prev), prev_line_spacing, prev_spacing
             )
         else:
             total_prev = 0.0
@@ -784,8 +893,22 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self._win11_lines = lines
         self._win11_active_index = len(lines) - 1 if lines else -1
         self._win11_last_committed = new_committed if new_committed else ""
-        self.setText("\n".join(lines))
-        self._resize_win11(lines)
+        display_text = ""
+        if visible_wrapped:
+            display_text = "\n".join(visible_wrapped)
+        elif lines:
+            display_text = lines[-1]
+        self.setText(display_text)
+        self._resize_win11(
+            lines,
+            rect=rect,
+            wrapped=wrapped_new,
+            line_spacing=line_spacing,
+            spacing=spacing,
+            padding_x=padding_x,
+            padding_y=padding_y,
+            visible_wrapped=visible_wrapped,
+        )
         self.repaint()
 
     def _trim_line(self, line: str, limit: int = 90) -> str:
@@ -797,6 +920,28 @@ class SubtitleOverlay(QtWidgets.QLabel):
             if len(clipped) - idx > 10:
                 return clipped[idx + 1 :]
         return clipped
+
+    def _win11_visible_segment_capacity(
+        self, rect: QtCore.QRect, line_spacing: float, spacing: float, padding_y: int
+    ) -> int:
+        usable = rect.height() - padding_y * 2
+        if usable <= 0:
+            return 1
+        denom = line_spacing + spacing
+        if denom <= 0:
+            return 1
+        capacity = int((usable + spacing) // denom)
+        return max(1, capacity)
+
+    @staticmethod
+    def _win11_limit_segments(
+        wrapped: list[str], sources: list[int], capacity: int
+    ) -> tuple[list[str], list[int]]:
+        if capacity <= 0 or not wrapped:
+            return [], []
+        if len(wrapped) <= capacity:
+            return list(wrapped), list(sources)
+        return list(wrapped[-capacity:]), list(sources[-capacity:])
 
     @staticmethod
     def _looks_cjk(text: str) -> bool:
@@ -833,10 +978,27 @@ class SubtitleOverlay(QtWidgets.QLabel):
         if not text:
             return [suffix] if suffix else []
         if self._looks_cjk(text):
-            max_len = 24
-            parts = [text[i : i + max_len] for i in range(0, len(text), max_len)]
+            max_len = 18
+            parts: list[str] = []
+            remaining = text
+            while remaining:
+                if len(remaining) <= max_len:
+                    parts.append(remaining)
+                    break
+                window = remaining[:max_len]
+                cutoff = len(window)
+                for idx in range(len(window), 0, -1):
+                    if window[idx - 1] in WIN11_BREAK_CHARS:
+                        cutoff = idx
+                        break
+                segment = remaining[:cutoff]
+                if not segment:
+                    segment = remaining[:max_len]
+                    cutoff = len(segment)
+                parts.append(segment)
+                remaining = remaining[cutoff:].lstrip()
         else:
-            max_len = 42
+            max_len = 32
             parts: list[str] = []
             current: list[str] = []
             current_len = 0
@@ -872,50 +1034,66 @@ class SubtitleOverlay(QtWidgets.QLabel):
                 parts = [suffix]
         return parts
 
-    def _resize_win11(self, lines: list[str]) -> None:
+    def _resize_win11(
+        self,
+        lines: list[str],
+        rect: QtCore.QRect | None = None,
+        wrapped: list[str] | None = None,
+        line_spacing: float | None = None,
+        spacing: float | None = None,
+        padding_x: int | None = None,
+        padding_y: int | None = None,
+        visible_wrapped: list[str] | None = None,
+    ) -> None:
         fm = QtGui.QFontMetrics(self.font())
         margin = 2 * self.margin()
-        line_spacing = fm.lineSpacing()
-        spacing = max(4, int(line_spacing * 0.25))
-        padding_x = max(18, int(line_spacing * 0.9))
-        padding_y = max(8, int(line_spacing * 0.4))
-        current_w = max(self.MIN_W, self.width())
-        available = max(60, current_w - padding_x * 2)
-        text_option = QtGui.QTextOption()
-        text_option.setWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
-        if not lines:
-            self._resize_keep_anchor(current_w, self.MIN_H)
-            return
-        line_count = 0
+        if rect is None:
+            rect = self._content_rect()
+        if (
+            wrapped is None
+            or line_spacing is None
+            or spacing is None
+            or padding_x is None
+            or padding_y is None
+        ):
+            layout_wrapped, _, line_spacing, spacing, padding_x, padding_y = self._compute_win11_layout(
+                rect, lines
+            )
+            wrapped = layout_wrapped
+        line_spacing = float(line_spacing if line_spacing is not None else fm.lineSpacing())
+        spacing = float(spacing if spacing is not None else max(4, int(line_spacing * 0.25)))
+        padding_x = int(padding_x if padding_x is not None else max(18, int(line_spacing * 0.9)))
+        padding_y = int(padding_y if padding_y is not None else max(8, int(line_spacing * 0.4)))
+        target_segments = visible_wrapped if visible_wrapped is not None else wrapped
         max_width = 0.0
-        for raw in lines:
-            text = raw.strip()
+        for segment in target_segments or []:
+            text = segment.strip()
             if not text:
                 continue
-            layout = QtGui.QTextLayout(text, self.font())
-            layout.setTextOption(text_option)
-            layout.beginLayout()
-            while True:
-                ln = layout.createLine()
-                if not ln.isValid():
-                    break
-                ln.setLineWidth(available)
-                start = ln.textStart()
-                length = ln.textLength()
-                segment = text[start : start + length]
-                max_width = max(max_width, float(fm.horizontalAdvance(segment)))
-                line_count += 1
-            layout.endLayout()
+            max_width = max(max_width, float(fm.horizontalAdvance(text)))
+        line_count = len(target_segments) if target_segments else 0
         if line_count == 0:
             line_count = 1
         content_height = line_count * line_spacing + max(0, line_count - 1) * spacing
-        target_w = max(self.MIN_W, int(max(current_w, max_width + padding_x * 2 + margin)))
-        target_h = max(self.MIN_H, int(content_height + padding_y * 2 + margin))
+        auto_w = int(max_width + padding_x * 2 + margin)
+        if self._win11_user_width is None:
+            target_w = max(self.MIN_W, self.width(), auto_w)
+        else:
+            target_w = max(self.MIN_W, self._win11_user_width)
+        auto_h = int(content_height + padding_y * 2 + margin)
+        if self._win11_user_height is None:
+            target_h = max(self.MIN_H, auto_h)
+        else:
+            target_h = max(self.MIN_H, self._win11_user_height)
         self._resize_keep_anchor(target_w, target_h)
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
-        if self.settings.strategy in {"win11", "realtime"} and self._current_text:
+        if (
+            self.settings.strategy in {"win11", "realtime"}
+            and self._current_text
+            and not self._win11_resizing
+        ):
             self._update_win11_caption(self._current_text, force=True)
 
     def _clear_subtitle(self):

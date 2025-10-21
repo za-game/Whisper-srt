@@ -39,7 +39,7 @@ from typing import Deque, List, Tuple, Any
 import re
 import zlib
 
-from srt_utils import drop_covered_blocks
+from srt_utils import drop_covered_blocks, realtime_path_for
 
 import numpy as np
 import scipy.signal as ss
@@ -169,11 +169,29 @@ parser.add_argument("--zh", default="s2twp", choices=["none", "t2tw", "s2t", "s2
 # 3-6 SRT輸出
 parser.add_argument("--srt_path", default="live.srt",
                     help="輸出 SRT 檔案完整路徑，預設為 live.srt")
+parser.add_argument("--realtime_path",
+                    help="即時字幕輸出檔案路徑（預設為 <SRT 檔名>.realtime.txt）")
 
 # 3-7 即時模式
 parser.add_argument("--rt-mode", default="balanced", choices=["balanced", "efficient"],
                     help="balanced=預設策略；efficient=高精度低負載模式，可降低漏字風險")
 args = parser.parse_args()
+SRT_PATH = Path(args.srt_path).expanduser().resolve()
+REALTIME_PATH = (
+    Path(args.realtime_path).expanduser().resolve()
+    if args.realtime_path
+    else realtime_path_for(SRT_PATH)
+)
+args.srt_path = str(SRT_PATH)
+args.realtime_path = str(REALTIME_PATH)
+try:
+    REALTIME_PATH.parent.mkdir(parents=True, exist_ok=True)
+except Exception:
+    pass
+try:
+    REALTIME_PATH.write_text("", encoding="utf-8")
+except Exception:
+    pass
 AUTO_VAD = args.auto_vad
 TEMPERATURES = [float(t) for t in args.temperature.split(",") if t.strip()]
 freq_words: set[str] = set()
@@ -223,6 +241,7 @@ if RT_MODE == "efficient":
     conf_thr_max = min(conf_thr_max, 0.65)
     CONF_THR_STEP = 0.01
 conf_thr = conf_thr_base
+REALTIME_WINDOW = 3
 
 # ─────────────────────────────────────────────────────────────
 # 4. Logging & CSV debug
@@ -420,6 +439,17 @@ def _load_translate_pipe(src: str, tgt: str):
         while True:
             try:
                 pipe = pipeline("translation", model=model, **kwargs)
+                break
+            except ModuleNotFoundError as exc:  # pragma: no cover - runtime dependency
+                missing = exc.name or ""
+                log.error(
+                    "translation model %s requires missing dependency '%s'. \n"
+                    "請執行 `pip install %s`.",
+                    model,
+                    missing,
+                    missing or "sentencepiece",
+                )
+                pipe = None
                 break
             except Exception as exc:  # pragma: no cover - runtime dependency
                 err = str(exc)
@@ -885,6 +915,7 @@ def writer():
     sliding: List[dict] = []
     FLUSH_EVERY = 0.06 if RT_MODE == "efficient" else 0.10
     last_flush = time.monotonic()
+    last_realtime = ""
 
     def should_commit(rec: dict) -> bool:
         text = rec.get("text", "")
@@ -898,11 +929,27 @@ def writer():
         nonlocal last_flush
         if force or should_commit(rec):
             flush(live); last_flush = time.monotonic()
+    def update_realtime():
+        nonlocal last_realtime
+        lines = [r.get("text", "") for r in live[-REALTIME_WINDOW:] if r.get("text")]
+        text = "\n".join(lines).strip()
+        if text == last_realtime:
+            return
+        try:
+            with open(REALTIME_PATH, "w", encoding="utf-8", newline="") as f:
+                f.write(text)
+        except Exception:
+            pass
+        else:
+            last_realtime = text
 
     while True:
         rec = write_q.get(); now = rec["start"]
 
+        prev_len = len(live)
         live = drop_covered_blocks(live, rec)
+        if len(live) != prev_len:
+            update_realtime()
         sliding = drop_covered_blocks(sliding, rec)
 
         # 1) replace or skip exact duplicates
@@ -915,16 +962,20 @@ def writer():
                 if rec["text"] == last["text"]:
                     write_q.task_done(); continue
                 live[-1] = rec
-                sliding[-1] = rec
+                if sliding:
+                    sliding[-1] = rec
                 commit_if_ready(rec)
+                update_realtime()
                 write_q.task_done(); continue
             if rec["text"] == last["text"]:
                 write_q.task_done(); continue
             if abs(rec["start"] - last["start"]) < DEDUP_WIN:
                 if rec["text"].startswith(last["text"]):
                     live[-1] = rec
-                    sliding[-1] = rec
+                    if sliding:
+                        sliding[-1] = rec
                     commit_if_ready(rec)
+                    update_realtime()
                     write_q.task_done(); continue
                 if last["text"].startswith(rec["text"]):
                     write_q.task_done(); continue
@@ -946,6 +997,7 @@ def writer():
                 ):
                     matched.update(rec)
                     commit_if_ready(rec)
+                    update_realtime()
             write_q.task_done(); continue
 
         # 3) merge MAXHOP back-to-back
@@ -960,11 +1012,13 @@ def writer():
                 last.update(text=rec["text"], end=rec["end"], reason="MERGE")
                 sliding.append(last)
                 commit_if_ready(last, force=True)
+                update_realtime()
                 write_q.task_done(); continue
 
         # 4) append & maintain sliding window
         live.append(rec); sliding.append(rec)
         sliding = [s for s in sliding if now - s["start"] < DEDUP_WIN]
+        update_realtime()
 
         # 5) flush conditions
         if rec["text"].endswith(COMMIT_TAILS) or rec["reason"] == "MERGE":
@@ -972,6 +1026,7 @@ def writer():
         elif time.monotonic() - last_flush >= FLUSH_EVERY and live:
             commit_if_ready(live[-1])
 
+        update_realtime()
         write_q.task_done()
 
 # ─────────────────────────────────────────────────────────────

@@ -4,6 +4,14 @@ import re
 from PyQt5 import QtCore
 
 
+def realtime_path_for(srt_path: Path) -> Path:
+    """Return the companion realtime text path for a given SRT output."""
+
+    base = Path(srt_path)
+    name = base.stem + ".realtime.txt"
+    return base.with_name(name)
+
+
 def _tc_to_sec(tc: str) -> float:
     h, m, s_ms = tc.split(":")
     s, ms = s_ms.split(",")
@@ -164,6 +172,7 @@ class LiveSRTWatcher(QtCore.QObject):
         parent=None,
         initial_emit: bool = False,
         mode: str = "last",
+        realtime_path: Path | None = None,
     ):
         super().__init__(parent)
         self.srt_path = Path(srt_path).resolve()
@@ -172,12 +181,26 @@ class LiveSRTWatcher(QtCore.QObject):
                 self.srt_path.touch(exist_ok=True)
             except Exception:
                 pass
+        if realtime_path is None:
+            realtime_path = realtime_path_for(self.srt_path)
+        self.realtime_path = Path(realtime_path).resolve()
+        if not self.realtime_path.exists():
+            try:
+                self.realtime_path.touch(exist_ok=True)
+            except Exception:
+                pass
         self._watcher = QtCore.QFileSystemWatcher(self)
         self._watcher.addPath(str(self.srt_path))
+        self._watcher.addPath(str(self.realtime_path))
         try:
             self._watcher.addPath(str(self.srt_path.parent))
         except Exception:
             pass
+        if self.realtime_path.parent != self.srt_path.parent:
+            try:
+                self._watcher.addPath(str(self.realtime_path.parent))
+            except Exception:
+                pass
 
         self._deb_timer = QtCore.QTimer(self)
         self._deb_timer.setSingleShot(True)
@@ -189,18 +212,26 @@ class LiveSRTWatcher(QtCore.QObject):
             QtCore.QTimer.singleShot(0, self._emit_latest)
 
         self._last_text = ""
-        self.mode = mode
+        self.mode = mode if mode in {"last", "realtime"} else "last"
 
     def set_mode(self, mode: str):
         if mode not in {"last", "realtime"}:
             mode = "last"
         if self.mode != mode:
             self.mode = mode
+            self._last_text = ""
             self._emit_latest()
+
+    def _read_realtime_text(self) -> str:
+        try:
+            txt = self.realtime_path.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            return ""
+        return txt.strip()
 
     def _emit_latest(self):
         if self.mode == "realtime":
-            text = parse_srt_realtime_text(self.srt_path)
+            text = self._read_realtime_text()
         else:
             text = parse_srt_last_text(self.srt_path)
         if text == self._last_text:
