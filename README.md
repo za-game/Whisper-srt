@@ -9,6 +9,7 @@ Whisper-srt 是一個利用 OpenAI Whisper 將音訊即時轉換成字幕並於�
    ```
    pip install -r requirements.txt
    ```
+   > 注意：Windows 上的 `sentencepiece` 版本 0.2.x 會在載入多語模型（例如 `facebook/m2m100_418M`）時發生存取例外，因此本專案固定使用 0.1.99 版，請勿升級至 0.2.x。
 
 ## 使用方式
 1. 執行 `python mWhisperSub.py` 啟動轉寫。

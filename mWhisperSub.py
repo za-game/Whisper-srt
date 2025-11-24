@@ -319,9 +319,59 @@ def compression_ratio(text: str) -> float:
 # ─────────────────────────────────────────────────────────────
 
 def load_model():
-    device = "cpu" if args.gpu < 0 else "cuda"
-    device_index = None if args.gpu < 0 else args.gpu
-    return WhisperModel(args.model_dir, device=device, device_index=device_index, compute_type=args.compute_type)
+    targets: list[tuple[str, int]] = []
+    if args.gpu >= 0:
+        targets.append(("cuda", args.gpu))
+    targets.append(("cpu", 0))
+    errors: list[str] = []
+    for device, device_index in targets:
+        preferred: list[str | None] = [args.compute_type]
+        if device == "cuda":
+            preferred += ["float16", "float32", "int8_float16"]
+        else:
+            preferred += ["int8", "float32"]
+        seen: set[str] = set()
+        for compute_type in preferred:
+            if not compute_type or compute_type in seen:
+                continue
+            seen.add(compute_type)
+            try:
+                log.info(
+                    "載入模型：device=%s index=%s compute_type=%s",
+                    device,
+                    device_index,
+                    compute_type,
+                )
+                return WhisperModel(
+                    args.model_dir,
+                    device=device,
+                    device_index=device_index,
+                    compute_type=compute_type,
+                )
+            except ValueError as exc:
+                msg = str(exc)
+                errors.append(msg)
+                if "compute type" in msg:
+                    log.warning(
+                        "Compute type %s 不支援於 %s：%s",
+                        compute_type,
+                        device,
+                        msg,
+                    )
+                    continue
+                log.warning("載入模型失敗（%s on %s）：%s", compute_type, device, msg)
+                break
+            except Exception as exc:  # pragma: no cover - native errors
+                msg = f"{type(exc).__name__}: {exc}"
+                errors.append(msg)
+                log.warning("載入模型失敗（%s on %s）：%s", compute_type, device, msg)
+                break
+        else:
+            continue
+        log.info("嘗試改用其他裝置配置…")
+    raise RuntimeError(
+        "無法載入 Whisper 模型：\n" + "\n".join(errors) + "\n請檢查 CUDA/CPU 環境或改用 CPU 模式。"
+    )
 
 model = load_model()
 
@@ -438,7 +488,7 @@ def _load_translate_pipe(src: str, tgt: str):
             model = str(local)
         while True:
             try:
-                pipe = pipeline("translation", model=model, **kwargs)
+                pipe = pipeline("translation", model=model, device=-1, **kwargs)
                 break
             except ModuleNotFoundError as exc:  # pragma: no cover - runtime dependency
                 missing = exc.name or ""
@@ -885,6 +935,7 @@ def _similar(a: str, b: str) -> float:
 
 def flush(live: List[dict]):
     outp = Path(args.srt_path)
+    outp.parent.mkdir(parents=True, exist_ok=True)
     data = srt.compose([
         srt.Subtitle(i + 1, timedelta(seconds=r["start"]), timedelta(seconds=r["end"]), r["text"])
         for i, r in enumerate(live[-800:])

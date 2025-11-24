@@ -593,6 +593,12 @@ class BootstrapWin(QtWidgets.QMainWindow):
         self.tray = None
         self.srt_watcher = None
         self.proc = None  # mWhisperSub 子程序的 handle
+        self._proc_timer = QtCore.QTimer(self)
+        self._proc_timer.setInterval(400)
+        self._proc_timer.timeout.connect(self._check_proc_alive)
+        self._proc_reader = None
+        self._proc_reader_stop = threading.Event()
+        self._handling_exit = False
 
         # 參數設定區
         form_layout = QtWidgets.QFormLayout()
@@ -2310,11 +2316,19 @@ class BootstrapWin(QtWidgets.QMainWindow):
         if not self.console_chk.isChecked():
             popen_kwargs.update(
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
             )
+        else:
+            popen_kwargs.update(stdin=None, stdout=None, stderr=None)
         # 非 Windows：不特別處理 console 視窗（由桌面環境決定），但仍會把 --log 傳給子程式（若有勾選）
         self.proc = subprocess.Popen([sys.executable, str(ENGINE_PY)] + args, **popen_kwargs)
+        self._proc_reader_stop.clear()
+        if not self.console_chk.isChecked() and self.proc.stdout:
+            self._start_proc_reader(self.proc.stdout)
+        self._proc_timer.start()
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
 
@@ -2408,7 +2422,67 @@ class BootstrapWin(QtWidgets.QMainWindow):
             except (TypeError, RuntimeError):
                 pass
             self.srt_watcher.updated.connect(self.overlay.show_entry_text)
-        
+
+    def _start_proc_reader(self, pipe):
+        def _reader():
+            try:
+                for line in pipe:
+                    if self._proc_reader_stop.is_set():
+                        break
+                    if not line:
+                        break
+                    self._ui_log(line.rstrip())
+            except Exception:
+                pass
+            finally:
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
+
+        self._proc_reader = threading.Thread(target=_reader, daemon=True)
+        self._proc_reader.start()
+
+    def _check_proc_alive(self):
+        if not self.proc:
+            return
+        exit_code = self.proc.poll()
+        if exit_code is None:
+            return
+        self._handle_proc_exit(exit_code, manual=False)
+
+    def _handle_proc_exit(self, exit_code, manual: bool = False):
+        if self._handling_exit:
+            return
+        self._handling_exit = True
+        self._proc_timer.stop()
+        self._proc_reader_stop.set()
+        proc = self.proc
+        if proc and proc.stdout:
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+        reader = self._proc_reader
+        self._proc_reader = None
+        if reader and reader.is_alive():
+            reader.join(timeout=0.5)
+        self.proc = None
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        if self.tray:
+            self.tray.set_running(False)
+        if self.overlay:
+            self.overlay.set_subtitle_text("")
+        if not manual:
+            if exit_code not in (0, None):
+                msg = f"轉寫程序提前結束 (exit code {exit_code}). 請查看下方日誌以了解詳細原因。"
+                self._ui_log(msg)
+                QtWidgets.QMessageBox.warning(self, "轉寫已終止", msg)
+            else:
+                self._ui_log("轉寫程序已結束。")
+        self._handling_exit = False
+
     def _graceful_terminate_proc(self, timeout=5.0):
         """優雅終止 mWhisperSub；成功回傳 True。"""
         if not self.proc or self.proc.poll() is not None:
@@ -2441,20 +2515,17 @@ class BootstrapWin(QtWidgets.QMainWindow):
         return self.proc.poll() is not None
 
     def stop_clicked(self):
+        if not self.proc:
+            return
         self._ui_log("正在停止轉寫…")
+        proc = self.proc
         ok = self._graceful_terminate_proc()
+        exit_code = proc.poll() if proc else None
+        self._handle_proc_exit(exit_code, manual=True)
         if ok:
             self._ui_log("轉寫已停止。")
         else:
             self._ui_log("轉寫停止逾時，已強制結束。")
-        self.proc = None
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        # 清一下 overlay 畫面（保留視窗）
-        if self.overlay:
-            self.overlay.set_subtitle_text("")
-        if getattr(self, "tray", None):
-            self.tray.set_running(False)
 
     def exit_clicked(self):
         if self.proc:

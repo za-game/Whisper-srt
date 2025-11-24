@@ -128,6 +128,8 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self._win11_last_committed: str = ""
         self._win11_user_height: int | None = None
         self._win11_user_width: int | None = None
+        self._win11_lines_raw: list[str] = []
+        self._win11_lines_display: list[str] = []
         self._win11_resizing = False
         self._win11_anim = QtCore.QVariantAnimation(self)
         self._win11_anim.setDuration(220)
@@ -543,10 +545,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
         radius = max(10, int(line_spacing * 0.45))
         offset = float(self._win11_anim_offset if anim_running else 0.0)
         step = float(self._win11_anim_step if anim_running else 0.0)
-        highlight_source = len(lines) - 1 if lines else -1
-        highlight_sources = set()
-        if highlight_source >= 0:
-            highlight_sources.add(highlight_source)
+        highlight_sources: set[int] = set()
 
         def _draw_text_with_style(draw_rect: QtCore.QRectF, text: str, color: QtGui.QColor) -> None:
             if not text:
@@ -673,6 +672,8 @@ class SubtitleOverlay(QtWidgets.QLabel):
         self._win11_anim_offset = 0.0
         self._win11_anim_step = 0.0
         self.update()
+        if self._current_text:
+            self._update_win11_caption(self._current_text, force=True)
 
     def _content_rect(self) -> QtCore.QRect:
         rect = self.rect().adjusted(5, 5, -5, -5)
@@ -766,6 +767,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
         if strategy == "none":
             self._current_text = ""
             self._win11_lines = []
+            self._win11_lines_display = []
             self.setText("")
             self._resize_keep_anchor(self.minimumWidth(), self.minimumHeight())
             self.repaint()
@@ -783,6 +785,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
             return
         self._current_text = text
         self._win11_lines = []
+        self._win11_lines_display = []
         if not text.strip():
             self.setText("")
             self._resize_keep_anchor(self.minimumWidth(), self.minimumHeight())
@@ -813,6 +816,7 @@ class SubtitleOverlay(QtWidgets.QLabel):
         if not clean:
             self._win11_anim.stop()
             self._win11_lines = []
+            self._win11_lines_display = []
             self._win11_active_index = -1
             self._win11_anim_prev_lines = []
             self._win11_anim_offset = 0.0
@@ -835,29 +839,34 @@ class SubtitleOverlay(QtWidgets.QLabel):
             lines.append(current)
         elif len(segments) >= 2:
             lines = segments[-2:]
-        lines = [self._trim_line(line) for line in lines if line]
-        if not lines and current:
-            lines = [self._trim_line(current)]
-        lines = lines[-2:]
-        prev_lines = list(self._win11_lines)
+        raw_lines = [self._trim_line(line) for line in lines if line]
+        if not raw_lines and current:
+            raw_lines = [self._trim_line(current)]
+        prev_display_lines = list(self._win11_lines_display)
+        prev_raw_lines = list(self._win11_lines_raw)
         prev_committed = self._win11_last_committed
-        new_committed = lines[0] if lines else ""
-        if not force and lines == prev_lines:
+        new_committed = raw_lines[0] if raw_lines else ""
+        if not force and raw_lines == prev_raw_lines:
             return
         rect = self._content_rect()
-        wrapped_new, sources_new, line_spacing, spacing, padding_x, padding_y = self._compute_win11_layout(
-            rect, lines
+        _, _, raw_line_spacing, raw_spacing, _, raw_padding_y = self._compute_win11_layout(
+            rect, raw_lines if raw_lines else [""]
         )
         visible_cap = self._win11_visible_segment_capacity(
-            rect, line_spacing, spacing, padding_y
+            rect, raw_line_spacing, raw_spacing, raw_padding_y
         )
-        visible_wrapped, visible_sources = self._win11_limit_segments(
-            wrapped_new, sources_new, visible_cap
+        display_candidates = self._win11_try_merge(rect, raw_lines)
+        anim_running_now = self._win11_anim.state() == QtCore.QAbstractAnimation.Running
+        wrapped_display, sources_display, line_spacing, spacing, padding_x, padding_y = self._compute_win11_layout(
+            rect, display_candidates
         )
-        total_new = self._win11_total_height(len(visible_wrapped), line_spacing, spacing)
-        if prev_lines:
+        wrapped_display, sources_display = self._win11_limit_segments(
+            wrapped_display, sources_display, visible_cap
+        )
+        total_new = self._win11_total_height(len(wrapped_display), line_spacing, spacing)
+        if prev_display_lines:
             wrapped_prev, sources_prev, prev_line_spacing, prev_spacing, _, _ = self._compute_win11_layout(
-                rect, prev_lines
+                rect, prev_display_lines
             )
             visible_prev, _ = self._win11_limit_segments(
                 wrapped_prev, sources_prev, visible_cap
@@ -869,14 +878,21 @@ class SubtitleOverlay(QtWidgets.QLabel):
             total_prev = 0.0
         animate = (
             not force
-            and bool(prev_lines)
-            and bool(lines)
+            and bool(prev_raw_lines)
+            and bool(raw_lines)
             and bool(new_committed)
             and new_committed != prev_committed
         )
+        prev_raw_last = prev_raw_lines[-1] if prev_raw_lines else ""
+        new_line = (
+            len(raw_lines) > len(prev_raw_lines)
+            or (raw_lines and prev_raw_lines and raw_lines[-1] != prev_raw_last)
+        )
+        if not new_line:
+            animate = False
         if animate:
             self._win11_anim.stop()
-            self._win11_anim_prev_lines = prev_lines
+            self._win11_anim_prev_lines = prev_display_lines
             delta = max(0.0, total_new - total_prev)
             if delta <= 0.0:
                 delta = line_spacing + spacing
@@ -890,24 +906,27 @@ class SubtitleOverlay(QtWidgets.QLabel):
             self._win11_anim_offset = 0.0
             self._win11_anim_step = 0.0
             self._win11_anim.stop()
-        self._win11_lines = lines
-        self._win11_active_index = len(lines) - 1 if lines else -1
+        display_lines = list(wrapped_display) if wrapped_display else list(display_candidates)
+        self._win11_lines_raw = raw_lines
+        self._win11_lines_display = display_lines
+        self._win11_lines = display_lines
+        self._win11_active_index = len(display_lines) - 1 if display_lines else -1
         self._win11_last_committed = new_committed if new_committed else ""
         display_text = ""
-        if visible_wrapped:
-            display_text = "\n".join(visible_wrapped)
-        elif lines:
-            display_text = lines[-1]
+        if wrapped_display:
+            display_text = "\n".join(wrapped_display)
+        elif display_lines:
+            display_text = display_lines[-1]
         self.setText(display_text)
         self._resize_win11(
-            lines,
+            display_lines,
             rect=rect,
-            wrapped=wrapped_new,
+            wrapped=wrapped_display,
             line_spacing=line_spacing,
             spacing=spacing,
             padding_x=padding_x,
             padding_y=padding_y,
-            visible_wrapped=visible_wrapped,
+            visible_wrapped=wrapped_display,
         )
         self.repaint()
 
@@ -942,6 +961,45 @@ class SubtitleOverlay(QtWidgets.QLabel):
         if len(wrapped) <= capacity:
             return list(wrapped), list(sources)
         return list(wrapped[-capacity:]), list(sources[-capacity:])
+
+    def _win11_try_merge(self, rect: QtCore.QRect, lines: list[str]) -> list[str]:
+        if len(lines) < 2:
+            return lines
+        font = self.font()
+        fm = QtGui.QFontMetrics(font)
+        line_spacing = fm.lineSpacing()
+        padding_x = max(18, int(line_spacing * 0.9))
+        available_width = max(60, rect.width() - padding_x * 2)
+        prev = lines[-2].strip()
+        curr = lines[-1].strip()
+        if not prev or not curr:
+            return lines
+        joiner = ""
+        if (
+            prev
+            and curr
+            and prev[-1].isascii()
+            and prev[-1].isalnum()
+            and curr[0].isascii()
+            and curr[0].isalnum()
+        ):
+            joiner = " "
+        combined = prev + joiner + curr
+        text_option = QtGui.QTextOption()
+        text_option.setWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
+        layout = QtGui.QTextLayout(combined, font)
+        layout.setTextOption(text_option)
+        layout.beginLayout()
+        line = layout.createLine()
+        fits = False
+        if line.isValid():
+            line.setLineWidth(float(available_width))
+            next_line = layout.createLine()
+            fits = not next_line.isValid()
+        layout.endLayout()
+        if fits:
+            return lines[:-2] + [combined]
+        return lines
 
     @staticmethod
     def _looks_cjk(text: str) -> bool:
