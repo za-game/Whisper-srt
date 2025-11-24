@@ -4,6 +4,6 @@ numpy
 tqdm
 huggingface_hub
 transformers
-sentencepiece
+sentencepiece==0.1.99
 pytest
 scipy

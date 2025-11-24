@@ -7,6 +7,7 @@ Realtime Whisper → SRT 字幕工具（2025-07-30  C-full  - 強化除錯版）
 •  `--device` 現在真正生效，並自動檢查裝置能力。
 •  程式碼重新分區塊，便於維護與閱讀。
 •  新增 realtime 字幕策略，可即時修正顯示。
+•  新增 efficient 即時模式：優先保留修正版字幕，降低漏字同時維持低負載。
 
 建議指令：
 ```bash
@@ -38,7 +39,7 @@ from typing import Deque, List, Tuple, Any
 import re
 import zlib
 
-from srt_utils import drop_covered_blocks
+from srt_utils import drop_covered_blocks, realtime_path_for
 
 import numpy as np
 import scipy.signal as ss
@@ -71,6 +72,7 @@ samples_lock = threading.Lock()
 audio_t0: float | None = None     # ADC 時基
 audio_origin: float | None = None # 給 SRT 的零時標
 _punct_re = re.compile(r"[，。？！；、,.!?;:…]")
+COMMIT_TAILS = tuple("。！？!?…．.；;：:")
 
 conf_thr_base = 0.4
 conf_thr_max = 0.8
@@ -167,7 +169,29 @@ parser.add_argument("--zh", default="s2twp", choices=["none", "t2tw", "s2t", "s2
 # 3-6 SRT輸出
 parser.add_argument("--srt_path", default="live.srt",
                     help="輸出 SRT 檔案完整路徑，預設為 live.srt")
+parser.add_argument("--realtime_path",
+                    help="即時字幕輸出檔案路徑（預設為 <SRT 檔名>.realtime.txt）")
+
+# 3-7 即時模式
+parser.add_argument("--rt-mode", default="balanced", choices=["balanced", "efficient"],
+                    help="balanced=預設策略；efficient=高精度低負載模式，可降低漏字風險")
 args = parser.parse_args()
+SRT_PATH = Path(args.srt_path).expanduser().resolve()
+REALTIME_PATH = (
+    Path(args.realtime_path).expanduser().resolve()
+    if args.realtime_path
+    else realtime_path_for(SRT_PATH)
+)
+args.srt_path = str(SRT_PATH)
+args.realtime_path = str(REALTIME_PATH)
+try:
+    REALTIME_PATH.parent.mkdir(parents=True, exist_ok=True)
+except Exception:
+    pass
+try:
+    REALTIME_PATH.write_text("", encoding="utf-8")
+except Exception:
+    pass
 AUTO_VAD = args.auto_vad
 TEMPERATURES = [float(t) for t in args.temperature.split(",") if t.strip()]
 freq_words: set[str] = set()
@@ -208,9 +232,16 @@ if args.translate:
             pair = ("en", args.translate_lang)
         _translate_pair = pair
 
+RT_MODE = args.rt_mode
+
 conf_thr_base = args.conf_base
 conf_thr_max = args.conf_max
+if RT_MODE == "efficient":
+    conf_thr_base = min(conf_thr_base, 0.35)
+    conf_thr_max = min(conf_thr_max, 0.65)
+    CONF_THR_STEP = 0.01
 conf_thr = conf_thr_base
+REALTIME_WINDOW = 3
 
 # ─────────────────────────────────────────────────────────────
 # 4. Logging & CSV debug
@@ -288,9 +319,59 @@ def compression_ratio(text: str) -> float:
 # ─────────────────────────────────────────────────────────────
 
 def load_model():
-    device = "cpu" if args.gpu < 0 else "cuda"
-    device_index = None if args.gpu < 0 else args.gpu
-    return WhisperModel(args.model_dir, device=device, device_index=device_index, compute_type=args.compute_type)
+    targets: list[tuple[str, int]] = []
+    if args.gpu >= 0:
+        targets.append(("cuda", args.gpu))
+    targets.append(("cpu", 0))
+    errors: list[str] = []
+    for device, device_index in targets:
+        preferred: list[str | None] = [args.compute_type]
+        if device == "cuda":
+            preferred += ["float16", "float32", "int8_float16"]
+        else:
+            preferred += ["int8", "float32"]
+        seen: set[str] = set()
+        for compute_type in preferred:
+            if not compute_type or compute_type in seen:
+                continue
+            seen.add(compute_type)
+            try:
+                log.info(
+                    "載入模型：device=%s index=%s compute_type=%s",
+                    device,
+                    device_index,
+                    compute_type,
+                )
+                return WhisperModel(
+                    args.model_dir,
+                    device=device,
+                    device_index=device_index,
+                    compute_type=compute_type,
+                )
+            except ValueError as exc:
+                msg = str(exc)
+                errors.append(msg)
+                if "compute type" in msg:
+                    log.warning(
+                        "Compute type %s 不支援於 %s：%s",
+                        compute_type,
+                        device,
+                        msg,
+                    )
+                    continue
+                log.warning("載入模型失敗（%s on %s）：%s", compute_type, device, msg)
+                break
+            except Exception as exc:  # pragma: no cover - native errors
+                msg = f"{type(exc).__name__}: {exc}"
+                errors.append(msg)
+                log.warning("載入模型失敗（%s on %s）：%s", compute_type, device, msg)
+                break
+        else:
+            continue
+        log.info("嘗試改用其他裝置配置…")
+    raise RuntimeError(
+        "無法載入 Whisper 模型：\n" + "\n".join(errors) + "\n請檢查 CUDA/CPU 環境或改用 CPU 模式。"
+    )
 
 model = load_model()
 
@@ -407,7 +488,18 @@ def _load_translate_pipe(src: str, tgt: str):
             model = str(local)
         while True:
             try:
-                pipe = pipeline("translation", model=model, **kwargs)
+                pipe = pipeline("translation", model=model, device=-1, **kwargs)
+                break
+            except ModuleNotFoundError as exc:  # pragma: no cover - runtime dependency
+                missing = exc.name or ""
+                log.error(
+                    "translation model %s requires missing dependency '%s'. \n"
+                    "請執行 `pip install %s`.",
+                    model,
+                    missing,
+                    missing or "sentencepiece",
+                )
+                pipe = None
                 break
             except Exception as exc:  # pragma: no cover - runtime dependency
                 err = str(exc)
@@ -583,6 +675,10 @@ speech_hist: Deque[Tuple[float, float]] = deque()
 speech_peak = 0.0
 
 DEDUP_WIN = 3.0; SIM_THR = 0.85; MERGE_WIN = 1.0
+if RT_MODE == "efficient":
+    DEDUP_WIN = 4.0
+    SIM_THR = 0.8
+    MERGE_WIN = 1.5
 
 if FS_IN not in SUPPORTED_VAD_SR:
     log.warning("裝置採樣率 %d Hz 不是 VAD 支援值，將自動重採樣到 48k", FS_IN)
@@ -839,6 +935,7 @@ def _similar(a: str, b: str) -> float:
 
 def flush(live: List[dict]):
     outp = Path(args.srt_path)
+    outp.parent.mkdir(parents=True, exist_ok=True)
     data = srt.compose([
         srt.Subtitle(i + 1, timedelta(seconds=r["start"]), timedelta(seconds=r["end"]), r["text"])
         for i, r in enumerate(live[-800:])
@@ -867,12 +964,43 @@ def flush(live: List[dict]):
 def writer():
     live: List[dict] = []
     sliding: List[dict] = []
-    FLUSH_EVERY = 0.10
+    FLUSH_EVERY = 0.06 if RT_MODE == "efficient" else 0.10
     last_flush = time.monotonic()
+    last_realtime = ""
+
+    def should_commit(rec: dict) -> bool:
+        text = rec.get("text", "")
+        if not text:
+            return False
+        if rec.get("reason") != "MAXHOP":
+            return True
+        return text.endswith(COMMIT_TAILS)
+
+    def commit_if_ready(rec: dict, *, force: bool = False):
+        nonlocal last_flush
+        if force or should_commit(rec):
+            flush(live); last_flush = time.monotonic()
+    def update_realtime():
+        nonlocal last_realtime
+        lines = [r.get("text", "") for r in live[-REALTIME_WINDOW:] if r.get("text")]
+        text = "\n".join(lines).strip()
+        if text == last_realtime:
+            return
+        try:
+            with open(REALTIME_PATH, "w", encoding="utf-8", newline="") as f:
+                f.write(text)
+        except Exception:
+            pass
+        else:
+            last_realtime = text
+
     while True:
         rec = write_q.get(); now = rec["start"]
 
+        prev_len = len(live)
         live = drop_covered_blocks(live, rec)
+        if len(live) != prev_len:
+            update_realtime()
         sliding = drop_covered_blocks(sliding, rec)
 
         # 1) replace or skip exact duplicates
@@ -885,26 +1013,42 @@ def writer():
                 if rec["text"] == last["text"]:
                     write_q.task_done(); continue
                 live[-1] = rec
-                sliding[-1] = rec
-                flush(live); last_flush = time.monotonic()
+                if sliding:
+                    sliding[-1] = rec
+                commit_if_ready(rec)
+                update_realtime()
                 write_q.task_done(); continue
             if rec["text"] == last["text"]:
                 write_q.task_done(); continue
             if abs(rec["start"] - last["start"]) < DEDUP_WIN:
                 if rec["text"].startswith(last["text"]):
                     live[-1] = rec
-                    sliding[-1] = rec
-                    flush(live); last_flush = time.monotonic()
+                    if sliding:
+                        sliding[-1] = rec
+                    commit_if_ready(rec)
+                    update_realtime()
                     write_q.task_done(); continue
                 if last["text"].startswith(rec["text"]):
                     write_q.task_done(); continue
 
-        # 2) similarity dedup
-        if any(
-            _similar(rec["text"], s["text"]) >= SIM_THR
-            and abs(rec["start"] - s["start"]) < DEDUP_WIN
-            for s in sliding
-        ):
+        # 2) similarity dedup / refresh
+        matched = None
+        matched_sim = 0.0
+        for s in sliding:
+            if abs(rec["start"] - s["start"]) < DEDUP_WIN:
+                sim = _similar(rec["text"], s["text"])
+                if sim >= SIM_THR and sim > matched_sim:
+                    matched = s
+                    matched_sim = sim
+        if matched:
+            if RT_MODE == "efficient":
+                if (
+                    rec["text"] != matched["text"]
+                    or not math.isclose(rec["end"], matched["end"], abs_tol=1e-3)
+                ):
+                    matched.update(rec)
+                    commit_if_ready(rec)
+                    update_realtime()
             write_q.task_done(); continue
 
         # 3) merge MAXHOP back-to-back
@@ -918,19 +1062,22 @@ def writer():
             ):
                 last.update(text=rec["text"], end=rec["end"], reason="MERGE")
                 sliding.append(last)
-                flush(live); last_flush = time.monotonic()
+                commit_if_ready(last, force=True)
+                update_realtime()
                 write_q.task_done(); continue
 
         # 4) append & maintain sliding window
         live.append(rec); sliding.append(rec)
         sliding = [s for s in sliding if now - s["start"] < DEDUP_WIN]
+        update_realtime()
 
         # 5) flush conditions
-        if any(rec["text"].endswith(p) for p in "。！？…") or rec["reason"] == "MERGE":
-            flush(live); last_flush = time.monotonic()
-        elif time.monotonic() - last_flush >= FLUSH_EVERY:
-            flush(live); last_flush = time.monotonic()
+        if rec["text"].endswith(COMMIT_TAILS) or rec["reason"] == "MERGE":
+            commit_if_ready(rec, force=True)
+        elif time.monotonic() - last_flush >= FLUSH_EVERY and live:
+            commit_if_ready(live[-1])
 
+        update_realtime()
         write_q.task_done()
 
 # ─────────────────────────────────────────────────────────────
